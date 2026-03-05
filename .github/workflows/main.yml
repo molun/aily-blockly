@@ -63,6 +63,12 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'dist/aily-blockly'
 
+      # 删除签名前生成的 blockmap 文件（签名后 exe 内容已变，blockmap 中的 SHA256 分块校验会失败）
+      - name: Remove stale blockmap files
+        run: |
+          Remove-Item -Path "dist/aily-blockly/*.blockmap" -Force -ErrorAction SilentlyContinue
+          Write-Host "✓ Removed stale blockmap files"
+
       # 重新生成 latest.yml（使用签名后的 exe hash）
       - name: Regenerate latest.yml with signed exe hash
         run: |
@@ -259,7 +265,32 @@ jobs:
           RELEASE_VERSION: ${{ steps.version.outputs.tag }}
         run: |
           python3 << 'PYTHON_EOF'
-          import json, os, urllib.request, sys
+          import json, os, re, urllib.request, sys
+
+          def strip_think_tags(text):
+              """Remove <think>...</think> blocks and standalone tags from AI output."""
+              text = re.sub(r'<think>[\s\S]*?</think>', '', text)
+              text = re.sub(r'</?think>', '', text)
+              return text.strip()
+
+          def call_ai(base_url, api_key, model, prompt):
+              payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 2000,
+                "temperature": 0.3
+              }
+              req = urllib.request.Request(
+                f'{base_url}/chat/completions',
+                data=json.dumps(payload).encode('utf-8'),
+                headers={
+                  'Content-Type': 'application/json',
+                  'Authorization': f'Bearer {api_key}'
+                }
+              )
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read())
+              return strip_think_tags(data['choices'][0]['message']['content'])
 
           try:
             version  = os.environ.get('RELEASE_VERSION', '')
@@ -274,66 +305,90 @@ jobs:
               print('⚠️ Could not read commits.txt')
 
             if not commits:
-              commits = "（无 commit 记录）"
+              commits = "(no commit records)"
 
             if not base_url:
               print("⚠️ AI_BASE_URL is not set, skipping AI generation")
-              changelog = f"## {version}\n\n### Changes\n\n{commits}"
-              with open('/tmp/changelog.md', 'w', encoding='utf-8') as f:
-                f.write(changelog)
+              fallback = f"## {version}\n\n### Changes\n\n{commits}"
+              with open('/tmp/changelog_en.md', 'w', encoding='utf-8') as f:
+                f.write(fallback)
+              with open('/tmp/changelog_zh.md', 'w', encoding='utf-8') as f:
+                f.write(fallback)
               exit(0)
 
-            prompt = (
-              f"你是一个专业的软件发布助手。请根据以下 Git commit 记录，生成一份简洁易读的版本更新说明。\n\n"
+            # --- Generate English changelog ---
+            prompt_en = (
+              f"You are a professional software release assistant. Based on the following Git commit records, "
+              f"generate a concise and readable version changelog IN ENGLISH ONLY.\n\n"
+              f"Version: {version}\n\n"
+              f"Commit records:\n{commits}\n\n"
+              "Output requirements:\n"
+              "1. Categorize by type using these emoji prefixes:\n"
+              "   - ✨ New Features\n"
+              "   - 🐛 Bug Fixes\n"
+              "   - ⚡ Performance\n"
+              "   - 🔧 Other Changes\n"
+              "2. IMPORTANT: Do NOT just re-list or categorize the raw commit messages. "
+              "Merge related commits into a single concise description. "
+              "For example, multiple commits about the same feature or fix should become ONE bullet point.\n"
+              "3. Each description should be concise and user-friendly, written for end users, not developers.\n"
+              "4. Skip trivial changes (typo fixes, minor refactors, CI tweaks) unless they are user-facing.\n"
+              "5. Output in pure Markdown format without code block wrappers.\n"
+              "6. Do NOT wrap your output in <think> tags or any XML-like tags."
+            )
+
+            try:
+              changelog_en = call_ai(base_url, api_key, model, prompt_en)
+              print("✓ English changelog generated successfully")
+            except Exception as e:
+              print(f"⚠️ English changelog AI generation failed: {e}")
+              changelog_en = f"## {version}\n\n### Changes\n\n{commits}"
+
+            with open('/tmp/changelog_en.md', 'w', encoding='utf-8') as f:
+              f.write(changelog_en)
+
+            print("--- English Changelog Preview ---")
+            print(changelog_en[:500])
+
+            # --- Generate Chinese changelog ---
+            prompt_zh = (
+              f"你是一个专业的软件发布助手。请根据以下 Git commit 记录，生成一份精简易读的版本更新说明，全部使用中文。\n\n"
               f"版本：{version}\n\n"
               f"Commit 记录：\n{commits}\n\n"
               "输出要求：\n"
-              "1. 中英文双语（中文在前，英文在后，各自独立段落）\n"
-              "2. 按类型分类，使用以下 emoji 前缀：\n"
-              "   - ✨ 新功能 / New Features\n"
-              "   - 🐛 问题修复 / Bug Fixes\n"
-              "   - ⚡ 性能优化 / Performance\n"
-              "   - 🔧 其他改动 / Other Changes\n"
-              "3. 每条描述面向普通用户，语言简洁友好\n"
-              "4. 输出纯 Markdown 格式，不要包含代码块包裹\n"
-              "5. 如果 commit 信息含义不明确，请合理推断"
-            )
-
-            payload = {
-              "model": model,
-              "messages": [{"role": "user", "content": prompt}],
-              "max_tokens": 2000,
-              "temperature": 0.3
-            }
-
-            req = urllib.request.Request(
-              f'{base_url}/chat/completions',
-              data=json.dumps(payload).encode('utf-8'),
-              headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {api_key}'
-              }
+              "1. 按类型分类，使用以下 emoji 前缀：\n"
+              "   - ✨ 新功能\n"
+              "   - 🐛 问题修复\n"
+              "   - ⚡ 性能优化\n"
+              "   - 🔧 其他改动\n"
+              "2. 重要：不要原封不动地搬运 commit 信息！将相关的多个 commit 合并归纳为一条简洁的描述。"
+              "例如同一个功能或修复涉及多条 commit，只需要写成一个要点即可。\n"
+              "3. 每条描述面向普通用户，语言简洁友好，不需要出现技术细节\n"
+              "4. 跳过琐碎改动（拼写修正、小重构、CI 调整等），除非它们影响用户体验\n"
+              "5. 输出纯 Markdown 格式，不要包含代码块包裹\n"
+              "6. 不要在输出中包含 <think> 标签或任何 XML 标签"
             )
 
             try:
-              with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read())
-              changelog = data['choices'][0]['message']['content'].strip()
-              print("✓ Changelog generated successfully")
+              changelog_zh = call_ai(base_url, api_key, model, prompt_zh)
+              print("✓ Chinese changelog generated successfully")
             except Exception as e:
-              print(f"⚠️ AI generation failed: {e}, using raw commits as fallback")
-              changelog = f"## {version}\n\n### Changes\n\n{commits}"
+              print(f"⚠️ Chinese changelog AI generation failed: {e}")
+              changelog_zh = f"## {version}\n\n### 更新内容\n\n{commits}"
 
-            with open('/tmp/changelog.md', 'w', encoding='utf-8') as f:
-                f.write(changelog)
+            with open('/tmp/changelog_zh.md', 'w', encoding='utf-8') as f:
+              f.write(changelog_zh)
 
-            print("--- Changelog Preview ---")
-            print(changelog[:500])
+            print("--- Chinese Changelog Preview ---")
+            print(changelog_zh[:500])
+
           except Exception as e:
             print(f"⚠️ Changelog generation encountered an unexpected error: {e}")
             try:
-              with open('/tmp/changelog.md', 'w', encoding='utf-8') as f:
-                f.write(f"## {os.environ.get('RELEASE_VERSION', 'Unknown')}\n\n### Changes\n\n（Changelog 生成失败，请查阅 git log）")
+              with open('/tmp/changelog_en.md', 'w', encoding='utf-8') as f:
+                f.write(f"## {os.environ.get('RELEASE_VERSION', 'Unknown')}\n\n### Changes\n\n(Changelog generation failed, please check git log)")
+              with open('/tmp/changelog_zh.md', 'w', encoding='utf-8') as f:
+                f.write(f"## {os.environ.get('RELEASE_VERSION', 'Unknown')}\n\n### 更新内容\n\n（Changelog 生成失败，请查阅 git log）")
             except Exception:
               pass
           PYTHON_EOF
@@ -350,28 +405,39 @@ jobs:
           name: AilyBlockly-macOS-Package
           path: ./release
 
-      - name: Prepare Changelog File
+      - name: Prepare Changelog Files
         id: release_body
         run: |
-          # 若 changelog 文件不存在（上一步失败），生成兜底内容
-          if [ ! -f /tmp/changelog.md ]; then
-            echo "⚠️ changelog.md not found, using fallback"
-            echo "## ${{ steps.version.outputs.tag }}" > /tmp/changelog.md
-            echo "" >> /tmp/changelog.md
-            echo "### Changes" >> /tmp/changelog.md
-            echo "" >> /tmp/changelog.md
-            echo "（Changelog 自动生成失败，请查阅 git log）" >> /tmp/changelog.md
+          # 若英文 changelog 文件不存在（上一步失败），生成兜底内容
+          if [ ! -f /tmp/changelog_en.md ]; then
+            echo "⚠️ changelog_en.md not found, using fallback"
+            echo "## ${{ steps.version.outputs.tag }}" > /tmp/changelog_en.md
+            echo "" >> /tmp/changelog_en.md
+            echo "### Changes" >> /tmp/changelog_en.md
+            echo "" >> /tmp/changelog_en.md
+            echo "(Changelog generation failed, please check git log)" >> /tmp/changelog_en.md
+          fi
+
+          # 若中文 changelog 文件不存在，生成兜底内容
+          if [ ! -f /tmp/changelog_zh.md ]; then
+            echo "⚠️ changelog_zh.md not found, using fallback"
+            echo "## ${{ steps.version.outputs.tag }}" > /tmp/changelog_zh.md
+            echo "" >> /tmp/changelog_zh.md
+            echo "### 更新内容" >> /tmp/changelog_zh.md
+            echo "" >> /tmp/changelog_zh.md
+            echo "（Changelog 生成失败，请查阅 git log）" >> /tmp/changelog_zh.md
           fi
 
           # 复制 changelog 到 release 目录，作为附件
-          cp /tmp/changelog.md ./release/CHANGELOG.md
-          echo "✓ CHANGELOG.md saved to release directory"
+          cp /tmp/changelog_en.md ./release/CHANGELOG.md
+          cp /tmp/changelog_zh.md ./release/CHANGELOG_ZH.md
+          echo "✓ CHANGELOG.md and CHANGELOG_ZH.md saved to release directory"
 
-          # 将 changelog 内容写入 GitHub Output，作为 Release body
+          # 将英文 changelog 内容写入 GitHub Output，作为 Release body
           # 注意：cat 后补一个空行，防止文件末尾无换行导致分隔符被拼接
           {
             echo 'body<<CHANGELOG_DELIMITER'
-            cat /tmp/changelog.md
+            cat /tmp/changelog_en.md
             echo ''
             echo 'CHANGELOG_DELIMITER'
           } >> $GITHUB_OUTPUT
@@ -385,11 +451,20 @@ jobs:
             ./release/*.exe
             ./release/*.dmg
             ./release/CHANGELOG.md
+            ./release/CHANGELOG_ZH.md
           draft: false
           prerelease: false
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Archive CHANGELOG Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AilyBlockly-Changelog
+          path: |
+            ./release/CHANGELOG.md
+            ./release/CHANGELOG_ZH.md
 
   # 任务 4a：上传 Windows 文件到 Cloudflare R2 存储（与Release并行执行）
   upload-windows-to-r2:
@@ -452,6 +527,58 @@ jobs:
           
           echo "✓ Windows 文件上传到 Cloudflare R2 完成"
           echo "公开访问地址: ${R2_PUBLIC_URL}"
+
+  # 任务 4c：上传 CHANGELOG 文件到 Cloudflare R2 存储
+  upload-changelog-to-r2:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download CHANGELOG Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: AilyBlockly-Changelog
+          path: ./artifacts
+
+      - name: Ensure AWS CLI is available
+        run: |
+          if ! command -v aws &> /dev/null; then
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip awscliv2.zip
+            sudo ./aws/install
+          fi
+          aws --version
+
+      - name: Upload CHANGELOG files to Cloudflare R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          R2_UPLOAD_PATH: ${{ secrets.R2_UPLOAD_PATH }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        run: |
+          aws configure set aws_access_key_id "$R2_ACCESS_KEY_ID"
+          aws configure set aws_secret_access_key "$R2_SECRET_ACCESS_KEY"
+          aws configure set default.region auto
+          
+          R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          
+          echo "上传 CHANGELOG 文件到 Cloudflare R2..."
+          
+          # upload-artifact preserves relative paths, files are under artifacts/release/
+          for file in CHANGELOG.md CHANGELOG_ZH.md; do
+            filepath="./artifacts/release/${file}"
+            if [ -f "${filepath}" ]; then
+              echo "  上传: ${file}"
+              aws s3 cp "${filepath}" "s3://${R2_BUCKET_NAME}/${R2_UPLOAD_PATH}/${file}" \
+                --endpoint-url "$R2_ENDPOINT" \
+                --content-type "text/markdown; charset=utf-8"
+            else
+              echo "  ⚠️ ${file} not found, skipping"
+            fi
+          done
+          
+          echo "✓ CHANGELOG 文件上传到 Cloudflare R2 完成"
 
   # 任务 4b：上传 macOS 文件到 Cloudflare R2 存储（与Release并行执行）
   upload-macos-to-r2:
@@ -570,7 +697,7 @@ jobs:
 
   # 任务 5：触发服务器脚本
   trigger-server-script:
-    needs: [upload-windows-to-r2, upload-macos-to-r2]
+    needs: [upload-windows-to-r2, upload-macos-to-r2, upload-changelog-to-r2]
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Server Script
