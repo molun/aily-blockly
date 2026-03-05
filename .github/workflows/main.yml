@@ -251,6 +251,7 @@ jobs:
 
       - name: Generate Changelog with AI
         id: changelog
+        continue-on-error: true
         env:
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
@@ -260,23 +261,29 @@ jobs:
           python3 << 'PYTHON_EOF'
           import json, os, urllib.request, sys
 
-          version  = os.environ.get('RELEASE_VERSION', '')
-          api_key  = os.environ.get('AI_API_KEY', '')
-          base_url = os.environ.get('AI_BASE_URL', '').rstrip('/')
-          model    = os.environ.get('AI_MODEL', 'gpt-4o-mini')
-          commits  = open('/tmp/commits.txt').read().strip()
+          try:
+            version  = os.environ.get('RELEASE_VERSION', '')
+            api_key  = os.environ.get('AI_API_KEY', '')
+            base_url = os.environ.get('AI_BASE_URL', '').rstrip('/')
+            model    = os.environ.get('AI_MODEL', 'gpt-4o-mini')
 
-          if not commits:
+            try:
+              commits = open('/tmp/commits.txt').read().strip()
+            except Exception:
+              commits = ''
+              print('⚠️ Could not read commits.txt')
+
+            if not commits:
               commits = "（无 commit 记录）"
 
-          if not base_url:
+            if not base_url:
               print("⚠️ AI_BASE_URL is not set, skipping AI generation")
               changelog = f"## {version}\n\n### Changes\n\n{commits}"
               with open('/tmp/changelog.md', 'w', encoding='utf-8') as f:
-                  f.write(changelog)
+                f.write(changelog)
               exit(0)
 
-          prompt = (
+            prompt = (
               f"你是一个专业的软件发布助手。请根据以下 Git commit 记录，生成一份简洁易读的版本更新说明。\n\n"
               f"版本：{version}\n\n"
               f"Commit 记录：\n{commits}\n\n"
@@ -290,38 +297,45 @@ jobs:
               "3. 每条描述面向普通用户，语言简洁友好\n"
               "4. 输出纯 Markdown 格式，不要包含代码块包裹\n"
               "5. 如果 commit 信息含义不明确，请合理推断"
-          )
+            )
 
-          payload = {
+            payload = {
               "model": model,
               "messages": [{"role": "user", "content": prompt}],
               "max_tokens": 2000,
               "temperature": 0.3
-          }
+            }
 
-          req = urllib.request.Request(
+            req = urllib.request.Request(
               f'{base_url}/chat/completions',
               data=json.dumps(payload).encode('utf-8'),
               headers={
-                  'Content-Type': 'application/json',
-                  'Authorization': f'Bearer {api_key}'
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}'
               }
-          )
+            )
 
-          try:
+            try:
               with urllib.request.urlopen(req, timeout=60) as resp:
-                  data = json.loads(resp.read())
+                data = json.loads(resp.read())
               changelog = data['choices'][0]['message']['content'].strip()
               print("✓ Changelog generated successfully")
-          except Exception as e:
+            except Exception as e:
               print(f"⚠️ AI generation failed: {e}, using raw commits as fallback")
               changelog = f"## {version}\n\n### Changes\n\n{commits}"
 
-          with open('/tmp/changelog.md', 'w', encoding='utf-8') as f:
-              f.write(changelog)
+            with open('/tmp/changelog.md', 'w', encoding='utf-8') as f:
+                f.write(changelog)
 
-          print("--- Changelog Preview ---")
-          print(changelog[:500])
+            print("--- Changelog Preview ---")
+            print(changelog[:500])
+          except Exception as e:
+            print(f"⚠️ Changelog generation encountered an unexpected error: {e}")
+            try:
+              with open('/tmp/changelog.md', 'w', encoding='utf-8') as f:
+                f.write(f"## {os.environ.get('RELEASE_VERSION', 'Unknown')}\n\n### Changes\n\n（Changelog 生成失败，请查阅 git log）")
+            except Exception:
+              pass
           PYTHON_EOF
 
       - name: Download Windows Artifact
@@ -339,6 +353,16 @@ jobs:
       - name: Prepare Changelog File
         id: release_body
         run: |
+          # 若 changelog 文件不存在（上一步失败），生成兜底内容
+          if [ ! -f /tmp/changelog.md ]; then
+            echo "⚠️ changelog.md not found, using fallback"
+            echo "## ${{ steps.version.outputs.tag }}" > /tmp/changelog.md
+            echo "" >> /tmp/changelog.md
+            echo "### Changes" >> /tmp/changelog.md
+            echo "" >> /tmp/changelog.md
+            echo "（Changelog 自动生成失败，请查阅 git log）" >> /tmp/changelog.md
+          fi
+
           # 复制 changelog 到 release 目录，作为附件
           cp /tmp/changelog.md ./release/CHANGELOG.md
           echo "✓ CHANGELOG.md saved to release directory"
