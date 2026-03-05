@@ -161,10 +161,10 @@ jobs:
             echo "✅ Found: $IDENTITY"
           fi
 
-      # --- 构建 + 签名 + 公证（同时构建 arm64 与 x64）---
+      # --- 构建 + 签名 + 公证（仅构建 arm64）---
       - name: Build, Sign & Notarize
         run: |
-          npm run build:mac
+          npm run build
         env:
           NODE_ENV: production
           # electron-builder 签名配置
@@ -565,9 +565,10 @@ jobs:
           
           echo "上传 CHANGELOG 文件到 Cloudflare R2..."
           
-          # upload-artifact preserves relative paths, files are under artifacts/release/
+          # upload-artifact@v4 uses least-common-ancestor stripping: both files are under
+          # ./release/ so that prefix is stripped; files land directly under ./artifacts/
           for file in CHANGELOG.md CHANGELOG_ZH.md; do
-            filepath="./artifacts/release/${file}"
+            filepath="./artifacts/${file}"
             if [ -f "${filepath}" ]; then
               echo "  上传: ${file}"
               aws s3 cp "${filepath}" "s3://${R2_BUCKET_NAME}/${R2_UPLOAD_PATH}/${file}" \
