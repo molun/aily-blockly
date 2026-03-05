@@ -19,6 +19,7 @@ import { XAilyBlocklyViewerComponent } from './x-aily-blockly-viewer/x-aily-bloc
 import { XAilyErrorViewerComponent } from './x-aily-error-viewer/x-aily-error-viewer.component';
 import { XAilyTaskActionViewerComponent } from './x-aily-task-action-viewer/x-aily-task-action-viewer.component';
 import { XAilyCodeViewerComponent } from './x-aily-code-viewer/x-aily-code-viewer.component';
+import { XAilyDefaultViewerComponent } from './x-aily-default-viewer/x-aily-default-viewer.component';
 import { NzModalService } from 'ng-zorro-antd/modal';
 import { MermaidComponent } from '../aily-mermaid-viewer/mermaid/mermaid.component';
 import mermaid from 'mermaid';
@@ -63,6 +64,7 @@ const AILY_TYPES = [
     XAilyErrorViewerComponent,
     XAilyTaskActionViewerComponent,
     XAilyCodeViewerComponent,
+    XAilyDefaultViewerComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
@@ -107,6 +109,9 @@ const AILY_TYPES = [
     @if (isRegularCode) {
       <x-aily-code-viewer [children]="children" [block]="block" [lang]="lang" />
     }
+    @if (isDefaultBlock) {
+      <x-aily-default-viewer [content]="children" />
+    }
   `,
   styles: [`
     :host { display: block; padding: 0.5em 0; }
@@ -145,12 +150,18 @@ export class AilyChatCodeComponent implements OnChanges, OnDestroy {
   isType(t: string): boolean { return this.block && this.lang === t; }
 
   get isRegularCode(): boolean {
-    if (!this.block) return true;
+    if (!this.block) return false;
     if (this.isMermaidStd) return false;
     return !AILY_TYPES.includes(this.lang as any);
   }
 
   get isMermaidStd(): boolean { return this.block && this.lang === 'mermaid'; }
+
+  /** 非支持的 block 类型时使用默认 viewer 渲染（如 inline、aily-* 解析失败等） */
+  get isDefaultBlock(): boolean {
+    if (!this.block) return true;
+    return false;
+  }
 
   get mermaidData(): { code?: string } | null {
     if (this.isMermaidStd) {
@@ -223,17 +234,25 @@ export class AilyChatCodeComponent implements OnChanges, OnDestroy {
         return;
       }
 
+      const forcedStyle = 'width: 60vw !important; height: 80vh !important; max-width: 100% !important; display: block !important;';
       const enhancedSvg = svg
         .replace('<svg', `<svg id="${diagramId}" data-mermaid-svg="true"`)
-        .replace(/width="[^"]*"/, 'width="100%"')
-        .replace(/height="[^"]*"/, 'height="auto"')
-        .replace(/<svg([^>]*)>/, (_m: string, attrs: string) => `<svg${attrs} style="max-width: 100%; height: auto; display: block;">`);
+        .replace(/width="[^"]*"/, 'width="60vw"')
+        .replace(/height="[^"]*"/, 'height="80vh"')
+        .replace(/<svg([^>]*)>/, (_m: string, attrs: string) => {
+          const merged = /style=/.test(attrs)
+            ? attrs.replace(/style="[^"]*"/, `style="${forcedStyle}"`)
+            : `${attrs} style="${forcedStyle}"`;
+          return `<svg${merged}>`;
+        });
 
       this.modal.create({
         nzTitle: null,
         nzFooter: null,
         nzClosable: false,
-        nzBodyStyle: { padding: '0' },
+        nzBodyStyle: {
+          padding: '0',
+        },
         nzContent: MermaidComponent,
         nzData: { svg: enhancedSvg },
         nzWidth: 'fit-content',
