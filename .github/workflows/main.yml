@@ -74,19 +74,31 @@ jobs:
         run: |
           cd dist/aily-blockly
           
-          # 获取签名后的 exe 文件信息
-          $exeFile = Get-ChildItem -Filter "*.exe" | Select-Object -First 1
+          # 列出目录文件（调试用）
+          Write-Host "Files in dist/aily-blockly:"
+          Get-ChildItem -File | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
+          
+          # 获取签名后的 exe 文件（优先匹配安装包命名模式）
+          $exeFile = Get-ChildItem -Filter "aily-blockly-Setup-*.exe" | Select-Object -First 1
+          if (-not $exeFile) {
+            $exeFile = Get-ChildItem -Filter "*.exe" | Select-Object -First 1
+          }
+          if (-not $exeFile) {
+            Write-Error "No exe file found in dist/aily-blockly!"
+            exit 1
+          }
           $exeSize = $exeFile.Length
           $exeName = $exeFile.Name
           
           Write-Host "✓ Signed exe: $exeName ($exeSize bytes)"
           
           # 计算签名后的 SHA512 hash（base64格式）
-          $hash = Get-FileHash -Path $exeName -Algorithm SHA512
+          $hash = Get-FileHash -Path $exeFile.FullName -Algorithm SHA512
           $hashBytes = [System.Convert]::FromHexString($hash.Hash)
           $sha512Base64 = [System.Convert]::ToBase64String($hashBytes)
           
           Write-Host "✓ SHA512: $sha512Base64"
+          Write-Host "✓ SHA512 length: $($sha512Base64.Length) chars"
           
           # 从 package.json 读取版本号
           $packageJson = Get-Content "../../package.json" -Raw | ConvertFrom-Json
@@ -95,25 +107,38 @@ jobs:
           # 获取发布日期（ISO 8601格式）
           $releaseDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
           
-          # 生成新的 latest.yml 文件
-          $latestYml = @"
-          version: $version
-          files:
-            - url: $exeName
-              sha512: $sha512Base64
-              size: $exeSize
-          path: $exeName
-          sha512: $sha512Base64
-          releaseDate: '$releaseDate'
-          "@
+          # 生成 latest.yml 内容（使用字符串拼接 + LF 换行符，避免 here-string 缩进问题）
+          $lf = "`n"
+          $content = "version: $version" + $lf +
+                     "files:" + $lf +
+                     "  - url: $exeName" + $lf +
+                     "    sha512: $sha512Base64" + $lf +
+                     "    size: $exeSize" + $lf +
+                     "path: $exeName" + $lf +
+                     "sha512: $sha512Base64" + $lf +
+                     "releaseDate: '$releaseDate'" + $lf
           
-          # 覆盖原有的 latest.yml
-          $latestYml | Out-File -FilePath "latest.yml" -Encoding UTF8 -NoNewline
+          # 使用 .NET API 直接写入（确保 UTF-8 无 BOM，LF 换行符）
+          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText(
+            (Join-Path $PWD "latest.yml"),
+            $content,
+            $utf8NoBom
+          )
           
           Write-Host "✓ latest.yml regenerated with signed exe hash"
           Write-Host ""
           Write-Host "Content:"
           Get-Content "latest.yml"
+          
+          # 验证写入结果
+          $verify = [System.IO.File]::ReadAllText((Join-Path $PWD "latest.yml"))
+          if ($verify -notmatch [regex]::Escape($sha512Base64)) {
+            Write-Error "Verification FAILED: sha512 not found in generated latest.yml!"
+            Write-Host "Expected sha512: $sha512Base64"
+            exit 1
+          }
+          Write-Host "✓ Verification passed: sha512 matches in latest.yml"
 
       # ================== SignPath 签名流程结束 ==================
 
@@ -123,8 +148,9 @@ jobs:
           name: AilyBlockly-Windows-Package
           path: dist/aily-blockly/
   
-  # 任务 2：macOS 客户端构建
+  # 任务 2：macOS 客户端构建（当前跳过，仅构建 Windows）
   build-macos:
+    if: false
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -223,14 +249,12 @@ jobs:
 
   # 任务 3：发布到 GitHub Release
   release:
-    needs: [build-windows, build-macos]
+    needs: [build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # 获取完整 git 历史，用于对比 tag 生成 changelog
 
       - name: Extract version from package.json
         id: version
@@ -239,232 +263,23 @@ jobs:
           echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
           echo "Version: v${VERSION}"
 
-      - name: Get Git Commits Since Last Tag
-        id: commits
-        run: |
-          # 获取上一个 tag（排除当前可能已打的 tag）
-          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${{ steps.version.outputs.tag }}$" | head -n 1 || echo "")
-          if [ -z "$PREV_TAG" ]; then
-            echo "⚠️ No previous tag found, collecting last 50 commits"
-            git log --pretty=format:"- %s" --no-merges | head -50 > /tmp/commits.txt
-          else
-            echo "✓ Comparing $PREV_TAG → HEAD"
-            git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --no-merges > /tmp/commits.txt
-          fi
-          COMMIT_COUNT=$(wc -l < /tmp/commits.txt | tr -d ' ')
-          echo "✓ Found ${COMMIT_COUNT} commits"
-          cat /tmp/commits.txt
-
-      - name: Generate Changelog with AI
-        id: changelog
-        continue-on-error: true
-        env:
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
-          AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
-          AI_MODEL: ${{ secrets.AI_MODEL }}
-          RELEASE_VERSION: ${{ steps.version.outputs.tag }}
-        run: |
-          python3 << 'PYTHON_EOF'
-          import json, os, re, urllib.request, sys
-
-          def strip_think_tags(text):
-              """Remove <think>...</think> blocks and standalone tags from AI output."""
-              text = re.sub(r'<think>[\s\S]*?</think>', '', text)
-              text = re.sub(r'</?think>', '', text)
-              return text.strip()
-
-          def call_ai(base_url, api_key, model, prompt):
-              payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2000,
-                "temperature": 0.3
-              }
-              req = urllib.request.Request(
-                f'{base_url}/chat/completions',
-                data=json.dumps(payload).encode('utf-8'),
-                headers={
-                  'Content-Type': 'application/json',
-                  'Authorization': f'Bearer {api_key}'
-                }
-              )
-              with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read())
-              return strip_think_tags(data['choices'][0]['message']['content'])
-
-          try:
-            version  = os.environ.get('RELEASE_VERSION', '')
-            api_key  = os.environ.get('AI_API_KEY', '')
-            base_url = os.environ.get('AI_BASE_URL', '').rstrip('/')
-            model    = os.environ.get('AI_MODEL', 'gpt-4o-mini')
-
-            try:
-              commits = open('/tmp/commits.txt').read().strip()
-            except Exception:
-              commits = ''
-              print('⚠️ Could not read commits.txt')
-
-            if not commits:
-              commits = "(no commit records)"
-
-            if not base_url:
-              print("⚠️ AI_BASE_URL is not set, skipping AI generation")
-              fallback = f"## {version}\n\n### Changes\n\n{commits}"
-              with open('/tmp/changelog_en.md', 'w', encoding='utf-8') as f:
-                f.write(fallback)
-              with open('/tmp/changelog_zh.md', 'w', encoding='utf-8') as f:
-                f.write(fallback)
-              exit(0)
-
-            # --- Generate English changelog ---
-            prompt_en = (
-              f"You are a professional software release assistant. Based on the following Git commit records, "
-              f"generate a concise and readable version changelog IN ENGLISH ONLY.\n\n"
-              f"Version: {version}\n\n"
-              f"Commit records:\n{commits}\n\n"
-              "Output requirements:\n"
-              "1. Categorize by type using these emoji prefixes:\n"
-              "   - ✨ New Features\n"
-              "   - 🐛 Bug Fixes\n"
-              "   - ⚡ Performance\n"
-              "   - 🔧 Other Changes\n"
-              "2. IMPORTANT: Do NOT just re-list or categorize the raw commit messages. "
-              "Merge related commits into a single concise description. "
-              "For example, multiple commits about the same feature or fix should become ONE bullet point.\n"
-              "3. Each description should be concise and user-friendly, written for end users, not developers.\n"
-              "4. Skip trivial changes (typo fixes, minor refactors, CI tweaks) unless they are user-facing.\n"
-              "5. Output in pure Markdown format without code block wrappers.\n"
-              "6. Do NOT wrap your output in <think> tags or any XML-like tags."
-            )
-
-            try:
-              changelog_en = call_ai(base_url, api_key, model, prompt_en)
-              print("✓ English changelog generated successfully")
-            except Exception as e:
-              print(f"⚠️ English changelog AI generation failed: {e}")
-              changelog_en = f"## {version}\n\n### Changes\n\n{commits}"
-
-            with open('/tmp/changelog_en.md', 'w', encoding='utf-8') as f:
-              f.write(changelog_en)
-
-            print("--- English Changelog Preview ---")
-            print(changelog_en[:500])
-
-            # --- Generate Chinese changelog ---
-            prompt_zh = (
-              f"你是一个专业的软件发布助手。请根据以下 Git commit 记录，生成一份精简易读的版本更新说明，全部使用中文。\n\n"
-              f"版本：{version}\n\n"
-              f"Commit 记录：\n{commits}\n\n"
-              "输出要求：\n"
-              "1. 按类型分类，使用以下 emoji 前缀：\n"
-              "   - ✨ 新功能\n"
-              "   - 🐛 问题修复\n"
-              "   - ⚡ 性能优化\n"
-              "   - 🔧 其他改动\n"
-              "2. 重要：不要原封不动地搬运 commit 信息！将相关的多个 commit 合并归纳为一条简洁的描述。"
-              "例如同一个功能或修复涉及多条 commit，只需要写成一个要点即可。\n"
-              "3. 每条描述面向普通用户，语言简洁友好，不需要出现技术细节\n"
-              "4. 跳过琐碎改动（拼写修正、小重构、CI 调整等），除非它们影响用户体验\n"
-              "5. 输出纯 Markdown 格式，不要包含代码块包裹\n"
-              "6. 不要在输出中包含 <think> 标签或任何 XML 标签"
-            )
-
-            try:
-              changelog_zh = call_ai(base_url, api_key, model, prompt_zh)
-              print("✓ Chinese changelog generated successfully")
-            except Exception as e:
-              print(f"⚠️ Chinese changelog AI generation failed: {e}")
-              changelog_zh = f"## {version}\n\n### 更新内容\n\n{commits}"
-
-            with open('/tmp/changelog_zh.md', 'w', encoding='utf-8') as f:
-              f.write(changelog_zh)
-
-            print("--- Chinese Changelog Preview ---")
-            print(changelog_zh[:500])
-
-          except Exception as e:
-            print(f"⚠️ Changelog generation encountered an unexpected error: {e}")
-            try:
-              with open('/tmp/changelog_en.md', 'w', encoding='utf-8') as f:
-                f.write(f"## {os.environ.get('RELEASE_VERSION', 'Unknown')}\n\n### Changes\n\n(Changelog generation failed, please check git log)")
-              with open('/tmp/changelog_zh.md', 'w', encoding='utf-8') as f:
-                f.write(f"## {os.environ.get('RELEASE_VERSION', 'Unknown')}\n\n### 更新内容\n\n（Changelog 生成失败，请查阅 git log）")
-            except Exception:
-              pass
-          PYTHON_EOF
-
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
           name: AilyBlockly-Windows-Package
           path: ./release
 
-      - name: Download macOS Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: AilyBlockly-macOS-Package
-          path: ./release
-
-      - name: Prepare Changelog Files
-        id: release_body
-        run: |
-          # 若英文 changelog 文件不存在（上一步失败），生成兜底内容
-          if [ ! -f /tmp/changelog_en.md ]; then
-            echo "⚠️ changelog_en.md not found, using fallback"
-            echo "## ${{ steps.version.outputs.tag }}" > /tmp/changelog_en.md
-            echo "" >> /tmp/changelog_en.md
-            echo "### Changes" >> /tmp/changelog_en.md
-            echo "" >> /tmp/changelog_en.md
-            echo "(Changelog generation failed, please check git log)" >> /tmp/changelog_en.md
-          fi
-
-          # 若中文 changelog 文件不存在，生成兜底内容
-          if [ ! -f /tmp/changelog_zh.md ]; then
-            echo "⚠️ changelog_zh.md not found, using fallback"
-            echo "## ${{ steps.version.outputs.tag }}" > /tmp/changelog_zh.md
-            echo "" >> /tmp/changelog_zh.md
-            echo "### 更新内容" >> /tmp/changelog_zh.md
-            echo "" >> /tmp/changelog_zh.md
-            echo "（Changelog 生成失败，请查阅 git log）" >> /tmp/changelog_zh.md
-          fi
-
-          # 复制 changelog 到 release 目录，作为附件
-          cp /tmp/changelog_en.md ./release/CHANGELOG.md
-          cp /tmp/changelog_zh.md ./release/CHANGELOG_ZH.md
-          echo "✓ CHANGELOG.md and CHANGELOG_ZH.md saved to release directory"
-
-          # 将英文 changelog 内容写入 GitHub Output，作为 Release body
-          # 注意：cat 后补一个空行，防止文件末尾无换行导致分隔符被拼接
-          {
-            echo 'body<<CHANGELOG_DELIMITER'
-            cat /tmp/changelog_en.md
-            echo ''
-            echo 'CHANGELOG_DELIMITER'
-          } >> $GITHUB_OUTPUT
-
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          body: ${{ steps.release_body.outputs.body }}
           files: |
             ./release/*.exe
-            ./release/*.dmg
-            ./release/CHANGELOG.md
-            ./release/CHANGELOG_ZH.md
           draft: false
           prerelease: false
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Archive CHANGELOG Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: AilyBlockly-Changelog
-          path: |
-            ./release/CHANGELOG.md
-            ./release/CHANGELOG_ZH.md
 
   # 任务 4a：上传 Windows 文件到 Cloudflare R2 存储（与Release并行执行）
   upload-windows-to-r2:
@@ -517,19 +332,21 @@ jobs:
             fi
           done
           
-          # 最后上传 latest.yml（确保安装包已上传完成）
+          # 最后上传 latest.yml（确保安装包已上传完成，禁用 CDN 缓存防止新旧文件不匹配）
           echo "上传 latest.yml 配置文件..."
           if [ -f "./artifacts/windows/latest.yml" ]; then
             aws s3 cp "./artifacts/windows/latest.yml" "s3://${R2_BUCKET_NAME}/${R2_UPLOAD_PATH}/latest.yml" \
               --endpoint-url "$R2_ENDPOINT" \
-              --content-type "text/yaml"
+              --content-type "text/yaml" \
+              --cache-control "no-cache, no-store, must-revalidate"
           fi
           
           echo "✓ Windows 文件上传到 Cloudflare R2 完成"
           echo "公开访问地址: ${R2_PUBLIC_URL}"
 
-  # 任务 4c：上传 CHANGELOG 文件到 Cloudflare R2 存储
+  # 任务 4c：上传 CHANGELOG 文件到 Cloudflare R2 存储（当前跳过）
   upload-changelog-to-r2:
+    if: false
     needs: [release]
     runs-on: ubuntu-latest
     steps:
@@ -581,8 +398,9 @@ jobs:
           
           echo "✓ CHANGELOG 文件上传到 Cloudflare R2 完成"
 
-  # 任务 4b：上传 macOS 文件到 Cloudflare R2 存储（与Release并行执行）
+  # 任务 4b：上传 macOS 文件到 Cloudflare R2 存储（当前跳过）
   upload-macos-to-r2:
+    if: false
     needs: [build-macos]
     runs-on: ubuntu-latest
     steps:
@@ -640,12 +458,13 @@ jobs:
             fi
           done
           
-          # 最后上传 latest-mac.yml（确保安装包已上传完成）
+          # 最后上传 latest-mac.yml（确保安装包已上传完成，禁用 CDN 缓存防止新旧文件不匹配）
           echo "上传 latest-mac.yml 配置文件..."
           if [ -f "./artifacts/macos/latest-mac.yml" ]; then
             aws s3 cp "./artifacts/macos/latest-mac.yml" "s3://${R2_BUCKET_NAME}/${R2_UPLOAD_PATH}/latest-mac.yml" \
               --endpoint-url "$R2_ENDPOINT" \
-              --content-type "text/yaml"
+              --content-type "text/yaml" \
+              --cache-control "no-cache, no-store, must-revalidate"
           fi
           
           echo "✓ macOS 文件上传到 Cloudflare R2 完成"
@@ -698,7 +517,7 @@ jobs:
 
   # 任务 5：触发服务器脚本
   trigger-server-script:
-    needs: [upload-windows-to-r2, upload-macos-to-r2, upload-changelog-to-r2]
+    needs: [upload-windows-to-r2]
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Server Script
