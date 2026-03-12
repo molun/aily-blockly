@@ -1,6 +1,6 @@
-import { ToolUseResult } from "./tools";
-import { injectTodoReminder } from "./todoWriteTool";
+﻿import { ToolUseResult } from "./tools";
 import { normalizePath } from "../services/security.service";
+import { AilyHost } from '../core/host';
 
 // 构建目录树的递归函数
 async function buildDirectoryTree(dirPath: string, currentDepth: number = 0, maxDepth: number = 3) {
@@ -9,9 +9,9 @@ async function buildDirectoryTree(dirPath: string, currentDepth: number = 0, max
     }
 
     try {
-        const stats = await window['fs'].statSync(dirPath);
-        const isDirectory = await window['fs'].isDirectory(dirPath);
-        const name = window['path'].basename(dirPath);
+        const stats = await AilyHost.get().fs.statSync(dirPath);
+        const isDirectory = await AilyHost.get().fs.isDirectory(dirPath);
+        const name = AilyHost.get().path.basename(dirPath);
 
         const node = {
             name,
@@ -24,9 +24,9 @@ async function buildDirectoryTree(dirPath: string, currentDepth: number = 0, max
 
         if (isDirectory && currentDepth < maxDepth) {
             try {
-                const files = await window['fs'].readDirSync(dirPath);
+                const files = await AilyHost.get().fs.readDirSync(dirPath);
                 for (const file of files) {
-                    const childPath = window['path'].join(dirPath, file.name);
+                    const childPath = AilyHost.get().path.join(dirPath, file.name);
                     const childNode = await buildDirectoryTree(childPath, currentDepth + 1, maxDepth);
                     if (childNode) {
                         node.children.push(childNode);
@@ -76,26 +76,26 @@ export async function getDirectoryTreeTool(
                 is_error: true, 
                 content: `无效的目录路径: "${dirPath}"` 
             };
-            return injectTodoReminder(toolResult, 'getDirectoryTreeTool');
+            return toolResult;
         }
 
         // 检查路径是否存在
-        if (!window['fs'].existsSync(dirPath)) {
+        if (!AilyHost.get().fs.existsSync(dirPath)) {
             const toolResult = {
                 is_error: true,
                 content: `目录不存在: ${dirPath}`
             };
-            return injectTodoReminder(toolResult, 'getDirectoryTreeTool');
+            return toolResult;
         }
 
         // 检查是否为目录
-        const isDirectory = await window['fs'].isDirectory(dirPath);
+        const isDirectory = await AilyHost.get().fs.isDirectory(dirPath);
         if (!isDirectory) {
             const toolResult = {
                 is_error: true,
                 content: `路径不是目录: ${dirPath}`
             };
-            return injectTodoReminder(toolResult, 'getDirectoryTreeTool');
+            return toolResult;
         }
 
         // 限制最大深度以防止性能问题
@@ -110,7 +110,7 @@ export async function getDirectoryTreeTool(
                 is_error: true, 
                 content: `无法构建目录树: ${dirPath}` 
             };
-            return injectTodoReminder(toolResult, 'getDirectoryTreeTool');
+            return toolResult;
         }
 
         // 如果不包含文件，过滤掉文件节点
@@ -133,14 +133,14 @@ export async function getDirectoryTreeTool(
                 is_error: false, 
                 content: JSON.stringify(filteredTree, null, 2) 
             };
-            return injectTodoReminder(toolResult, 'getDirectoryTreeTool');
+            return toolResult;
         }
 
         const toolResult = { 
             is_error: false, 
             content: JSON.stringify(directoryTree, null, 2) 
         };
-        return injectTodoReminder(toolResult, 'getDirectoryTreeTool');
+        return toolResult;
     } catch (error: any) {
         console.warn("获取目录树失败:", error);
         
@@ -153,6 +153,6 @@ export async function getDirectoryTreeTool(
             is_error: true, 
             content: errorMessage + `\n目标目录: ${params.path}` 
         };
-        return injectTodoReminder(toolResult, 'getDirectoryTreeTool');
+        return toolResult;
     }
 }

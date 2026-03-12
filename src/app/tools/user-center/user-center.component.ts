@@ -78,7 +78,7 @@ export class UserCenterComponent {
     this.authService.userInfo$
       .pipe(takeUntil(this.destroy$))
       .subscribe(userInfo => {
-        console.log('UserCenterComponent - 接收到用户信息更新: ', userInfo);
+        // console.log('UserCenterComponent - 接收到用户信息更新: ', userInfo);
         this.currentUser = userInfo;
         this.calculateQuotaUsagePercent();
       });
@@ -94,14 +94,16 @@ export class UserCenterComponent {
     try {
       await this.authService.checkAndSyncAuthStatus();
     } catch (error) {
-      console.error('同步认证状态失败:', error);
+      console.warn('同步认证状态失败:', error);
     }
   }
 
   refreshMe() {
     this.authService.refreshMe().then(() => {
-      console.log('Auth token refreshed.');
+      // console.log('Auth token refreshed.');
       this.calculateQuotaUsagePercent();
+    }).catch((error) => {
+      console.warn('刷新用户信息失败:', error);
     });
   }
 
@@ -139,7 +141,7 @@ export class UserCenterComponent {
           this.userInfo.email = '';
         },
         error: (error) => {
-          console.error('注册错误:', error);
+          console.warn('注册错误:', error);
           this.message.error('注册失败，请检查网络连接');
         },
         complete: () => {
@@ -147,7 +149,7 @@ export class UserCenterComponent {
         }
       });
     } catch (error) {
-      console.error('注册过程中出错:', error);
+      console.warn('注册过程中出错:', error);
       this.message.error('注册失败');
       this.isWaiting = false;
     }
@@ -159,7 +161,7 @@ export class UserCenterComponent {
       await this.authService.logout();
       this.message.success('已退出登录');
     } catch (error) {
-      console.error('退出登录失败:', error);
+      console.warn('退出登录失败:', error);
       this.message.error('退出登录失败');
     } finally {
       this.isWaiting = false;
@@ -283,26 +285,26 @@ export class UserCenterComponent {
   }
 
   private calculateQuotaUsagePercent(): void {
-    console.log('=== 开始计算配额使用百分比 ===');
-    console.log('currentUser 完整对象:', JSON.stringify(this.currentUser, null, 2));
-    console.log('currentUser?.quota:', this.currentUser?.quota);
+    // console.log('=== 开始计算配额使用百分比 ===');
+    // console.log('currentUser 完整对象:', JSON.stringify(this.currentUser, null, 2));
+    // console.log('currentUser?.quota:', this.currentUser?.quota);
     
     const total = this.currentUser?.quota?.total_token ?? 0;
     const used = this.currentUser?.quota?.used_token ?? 0;
     
-    console.log('提取的值 - total:', total, 'used:', used);
-    console.log('total 类型:', typeof total, 'used 类型:', typeof used);
+    // console.log('提取的值 - total:', total, 'used:', used);
+    // console.log('total 类型:', typeof total, 'used 类型:', typeof used);
     
     if (!total || total <= 0) {
       this.quotaUsagePercent = 0;
-      console.log('总配额为0或无效，设置使用百分比为0');
+      // console.log('总配额为0或无效，设置使用百分比为0');
       return;
     }
     const percent = (used / total) * 100;
     // 保留2位小数，不四舍五入到整数
     this.quotaUsagePercent = Math.max(0, Math.min(100, Number(percent.toFixed(2))));
-    console.log('计算得到的使用百分比:', this.quotaUsagePercent, '(used/total*100 =', used, '/', total, '*100)');
-    console.log('=== 计算完成 ===');
+    // console.log('计算得到的使用百分比:', this.quotaUsagePercent, '(used/total*100 =', used, '/', total, '*100)');
+    // console.log('=== 计算完成 ===');
   }
 
   /**

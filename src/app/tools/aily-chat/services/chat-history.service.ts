@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ChatHistoryService - Copilot 风格的聊天历史管理服务
  *
  * 采用「全局索引 + 分项目/全局兜底数据」双轨架构：
@@ -19,6 +19,7 @@
  */
 
 import { Injectable, OnDestroy } from '@angular/core';
+import { AilyHost } from '../core/host';
 
 // ===== 类型定义 =====
 
@@ -119,13 +120,22 @@ export class ChatHistoryService implements OnDestroy {
    * 获取历史列表（按 updatedAt 降序）
    * @param filter 筛选模式
    * @param projectPath 当前项目路径（filter='current-project' 时使用）
+   * @param projectRootPath 项目根目录路径（可选），用于同时包含根目录下创建的孤儿会话
    */
-  getHistoryList(filter: HistoryFilterMode = 'all', projectPath?: string | null): SessionIndexEntry[] {
+  getHistoryList(filter: HistoryFilterMode = 'all', projectPath?: string | null, projectRootPath?: string | null): SessionIndexEntry[] {
     this.ensureIndexLoaded();
     let result = [...this.index];
 
     if (filter === 'current-project' && projectPath) {
-      result = result.filter(e => this.isSamePath(e.projectPath, projectPath));
+      result = result.filter(e =>
+        // // 1. 无项目时创建的会话（projectPath === null）
+        // e.projectPath === null
+        // // 2. 属于当前项目的会话
+        // || this.isSamePath(e.projectPath, projectPath)
+        // // 3. 保存在根目录下的孤儿会话（无项目时 currentProjectPath === projectRootPath）
+        // || (projectRootPath && this.isSamePath(e.projectPath, projectRootPath))
+        this.isSamePath(e.projectPath, projectPath)
+      );
     }
 
     // 按 updatedAt 降序
@@ -187,7 +197,10 @@ export class ChatHistoryService implements OnDestroy {
     this.sessionCache.set(sessionId, sessionData);
 
     // 更新或创建索引条目
-    this.upsertIndexEntry(sessionId, fullMetadata, chatList.length);
+    // 仅在消息数量发生变化时才更新 updatedAt（避免切换会话时纯保存导致时间戳变更）
+    const existingEntry = this.index.find(e => e.sessionId === sessionId);
+    const messageCountChanged = !existingEntry || existingEntry.messageCount !== chatList.length;
+    this.upsertIndexEntry(sessionId, fullMetadata, chatList.length, messageCountChanged);
 
     // 写入磁盘
     this.writeSessionData(sessionId, sessionData);
@@ -197,6 +210,9 @@ export class ChatHistoryService implements OnDestroy {
     this.dirtySessionIds.delete(sessionId);
     this.indexDirty = false;
   }
+
+  /** 设计第一条消息时 saveSession 尚未执行，暂存待写入的标题 */
+  private pendingTitles = new Map<string, string>();
 
   /**
    * 仅更新索引中的标题（标题生成完成时调用，低 IO）
@@ -218,6 +234,12 @@ export class ChatHistoryService implements OnDestroy {
       }
       // 立即写索引（低 IO，只有几 KB）
       this.writeIndex();
+      console.log(`[ChatHistory] 标题已更新: ${sessionId} → "${title}"`);
+    } else {
+      // 索引条目尚未创建（会话首条消息发送时 saveSession 还未执行）
+      // 暂存标题，等 upsertIndexEntry 创建条目时自动应用
+      this.pendingTitles.set(sessionId, title);
+      console.log(`[ChatHistory] 标题暂存(条目未创建): ${sessionId} → "${title}"`);
     }
   }
 
@@ -380,6 +402,72 @@ export class ChatHistoryService implements OnDestroy {
   }
 
   // =========================================================================
+  // 公共 API - 孤儿会话领养（根目录 → 项目）
+  // =========================================================================
+
+  /**
+   * 将所有根目录孤儿会话（projectPath === null 或 projectPath === rootPath）迁移归属到指定项目。
+   * 适用于：用户最初无项目时创建了聊天记录，之后新建了项目，
+   * 希望将之前的历史记录归入新项目。
+   *
+   * 操作内容：
+   * 1. 更新索引条目的 projectPath / projectName
+   * 2. 将数据文件从全局目录移动到项目 .chat_history/ 目录
+   * 3. 更新内存缓存中的 metadata
+   *
+   * @param projectPath 目标项目的绝对路径
+   * @param rootPath 可选，项目根目录路径（用于识别保存在根目录下的孤儿会话）
+   * @returns 被迁移的会话数量
+   */
+  adoptOrphanSessions(projectPath: string, rootPath?: string | null): number {
+    if (!projectPath) return 0;
+    this.ensureIndexLoaded();
+
+    const orphans = this.index.filter(e =>
+      e.projectPath === null
+      || (rootPath && this.isSamePath(e.projectPath, rootPath) && !this.isSamePath(rootPath, projectPath))
+    );
+    if (orphans.length === 0) return 0;
+
+    const projectName = this.extractProjectName(projectPath);
+
+    for (const entry of orphans) {
+      const oldProjectPath = entry.projectPath;
+
+      // 1. 读取原始数据（内存缓存或磁盘）
+      const data = this.sessionCache.get(entry.sessionId)
+        || this.readSessionData(entry.sessionId, oldProjectPath);
+
+      // 2. 更新索引条目
+      entry.projectPath = projectPath;
+      entry.projectName = projectName;
+      entry.updatedAt = Date.now();
+
+      // 3. 更新缓存中的 metadata
+      if (data) {
+        data.metadata.projectPath = projectPath;
+        data.metadata.updatedAt = Date.now();
+        this.sessionCache.set(entry.sessionId, data);
+
+        // 4. 写入项目目录
+        this.writeSessionData(entry.sessionId, data);
+
+        // 5. 删除旧路径的数据文件
+        this.deleteSessionFile(entry.sessionId, oldProjectPath);
+        if (oldProjectPath !== null) {
+          // 同时清理全局兜底路径（以防双写）
+          this.deleteSessionFile(entry.sessionId, null);
+        }
+      }
+    }
+
+    // 6. 持久化索引
+    this.writeIndex();
+    console.log(`[ChatHistory] 已将 ${orphans.length} 个孤儿会话迁移到项目: ${projectPath}`);
+    return orphans.length;
+  }
+
+  // =========================================================================
   // 公共 API - 删除
   // =========================================================================
 
@@ -436,16 +524,27 @@ export class ChatHistoryService implements OnDestroy {
 
   /**
    * 更新或创建索引条目
+   * @param updateTimestamp 是否更新 updatedAt（默认 true），纯保存/切换时传 false 避免时间戳污染
    */
   private upsertIndexEntry(
     sessionId: string,
     metadata: SessionMetadata,
-    messageCount: number
+    messageCount: number,
+    updateTimestamp: boolean = true
   ): void {
+    // 检查是否有暂存标题（updateTitle 在条目尚未创建时调用的功法）
+    const pendingTitle = this.pendingTitles.get(sessionId);
+    if (pendingTitle) {
+      metadata = { ...metadata, title: pendingTitle };
+      this.pendingTitles.delete(sessionId);
+    }
+
     const existing = this.index.find(e => e.sessionId === sessionId);
     if (existing) {
       existing.title = metadata.title || existing.title;
-      existing.updatedAt = metadata.updatedAt || Date.now();
+      if (updateTimestamp) {
+        existing.updatedAt = metadata.updatedAt || Date.now();
+      }
       existing.messageCount = messageCount;
       existing.mode = metadata.mode || existing.mode;
       existing.model = metadata.model ?? existing.model;
@@ -600,12 +699,12 @@ export class ChatHistoryService implements OnDestroy {
       if (projectPath) {
         const filePath = this.joinPath(projectPath, this.PROJECT_CHAT_DIR, `${sessionId}.json`);
         if (this.fileExists(filePath)) {
-          window['fs'].unlinkSync(filePath);
+          AilyHost.get().fs.unlinkSync(filePath);
         }
       } else {
         const filePath = this.joinPath(this.getGlobalChatDataDir(), `${sessionId}.json`);
         if (this.fileExists(filePath)) {
-          window['fs'].unlinkSync(filePath);
+          AilyHost.get().fs.unlinkSync(filePath);
         }
       }
     } catch { }
@@ -636,42 +735,42 @@ export class ChatHistoryService implements OnDestroy {
   // =========================================================================
 
   private hasFs(): boolean {
-    return typeof window !== 'undefined' && !!window['fs'];
+    return typeof window !== 'undefined' && !!AilyHost.get().fs;
   }
 
   private fileExists(path: string): boolean {
     try {
-      return window['fs'].existsSync(path);
+      return AilyHost.get().fs.existsSync(path);
     } catch {
       return false;
     }
   }
 
   private readFileSync(path: string): string {
-    return window['fs'].readFileSync(path, 'utf-8');
+    return AilyHost.get().fs.readFileSync(path, 'utf-8');
   }
 
   private writeFileSync(path: string, content: string): void {
-    window['fs'].writeFileSync(path, content, 'utf-8');
+    AilyHost.get().fs.writeFileSync(path, content, 'utf-8');
   }
 
   private ensureDir(dirPath: string): void {
     if (!this.fileExists(dirPath)) {
-      window['fs'].mkdirSync(dirPath, { recursive: true });
+      AilyHost.get().fs.mkdirSync(dirPath, { recursive: true });
     }
   }
 
   private joinPath(...parts: string[]): string {
     // 优先使用 Electron 的 path API
-    if (window['path']?.join) {
-      return window['path'].join(...parts);
+    if (AilyHost.get().path?.join) {
+      return AilyHost.get().path.join(...parts);
     }
     // 降级：简单拼接
     return parts.join('/').replace(/\/+/g, '/');
   }
 
   private getGlobalAilyDir(): string {
-    return window['path']?.getAppDataPath?.() || '';
+    return AilyHost.get().path?.getAppDataPath?.() || '';
   }
 
   private getGlobalIndexPath(): string {

@@ -1,7 +1,5 @@
-import { ToolUseResult } from "./tools";
-import { ProjectService } from "../../../services/project.service";
-import { ConfigService } from '../../../services/config.service';
-import { injectTodoReminder } from "./todoWriteTool";
+﻿import { ToolUseResult } from "./tools";
+import { AilyHost } from '../core/host';
 
 interface LibraryInfo {
     name: string;
@@ -36,12 +34,12 @@ function collectProjectInfo(projectPath: string, projectName: string): CreatePro
     try {
         const ailyProjectPath = window["path"].join(projectPath, 'node_modules', '@aily-project');
 
-        if (!window['fs'].existsSync(ailyProjectPath)) {
+        if (!AilyHost.get().fs.existsSync(ailyProjectPath)) {
             result.message = `项目 "${projectName}" 创建成功！项目依赖目录尚未就绪。`;
             return result;
         }
 
-        const items = window['fs'].readdirSync(ailyProjectPath);
+        const items = AilyHost.get().fs.readdirSync(ailyProjectPath);
         const libraries: LibraryInfo[] = [];
         let board: BoardInfo | undefined;
 
@@ -49,7 +47,7 @@ function collectProjectInfo(projectPath: string, projectName: string): CreatePro
             const itemPath = window["path"].join(ailyProjectPath, item);
 
             try {
-                if (!window['fs'].isDirectory(itemPath)) continue;
+                if (!AilyHost.get().fs.isDirectory(itemPath)) continue;
             } catch {
                 continue;
             }
@@ -61,7 +59,7 @@ function collectProjectInfo(projectPath: string, projectName: string): CreatePro
             } else if (item.startsWith('lib-')) {
                 const libInfo: LibraryInfo = { name: item, path: simplifiedPath };
                 const readmePath = window["path"].join(itemPath, 'readme_ai.md');
-                if (window['fs'].existsSync(readmePath)) {
+                if (AilyHost.get().fs.existsSync(readmePath)) {
                     libInfo.readmeAiPath = `${simplifiedPath}/readme_ai.md`;
                 }
                 libraries.push(libInfo);
@@ -84,11 +82,18 @@ function collectProjectInfo(projectPath: string, projectName: string): CreatePro
     return result;
 }
 
-export async function newProjectTool(prjRootPath: string, toolArgs: any, prjService: ProjectService, configService: ConfigService): Promise<ToolUseResult> {
+export async function newProjectTool(prjRootPath: string, toolArgs: any, prjService: any, configService: any): Promise<ToolUseResult> {
     let is_error = false;
     let toolResult: string;
 
     try {
+        if (!prjService) {
+            throw new Error('项目服务不可用，无法创建项目');
+        }
+        if (!configService) {
+            throw new Error('配置服务不可用，无法获取开发板信息');
+        }
+
         // 判断toolArgs.board是否是JSON字符串
         let boardInfo;
         let boardName;
@@ -105,7 +110,13 @@ export async function newProjectTool(prjRootPath: string, toolArgs: any, prjServ
             }
         }
 
-        boardInfo = configService.boardDict[boardName] || null;
+        // 优先使用 boardDict（原始 ConfigService），降级到 boardList 搜索（IConfigProvider 适配器）
+        if (configService.boardDict) {
+            boardInfo = configService.boardDict[boardName] || null;
+        } else {
+            const boardList = configService.boardList || [];
+            boardInfo = boardList.find((b: any) => b.name === boardName) || null;
+        }
         if (!boardInfo) {
             throw new Error(`未找到开发板信息: ${toolArgs.board}`);
         }
@@ -130,5 +141,5 @@ export async function newProjectTool(prjRootPath: string, toolArgs: any, prjServ
         is_error,
         content: toolResult
     };
-    return injectTodoReminder(toolResults, 'newProjectTool');
+    return toolResults;
 }

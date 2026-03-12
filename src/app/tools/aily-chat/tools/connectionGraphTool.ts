@@ -1,7 +1,7 @@
-import { ToolUseResult } from './tools';
+﻿import { ToolUseResult } from './tools';
 import { ProjectService } from '../../../services/project.service';
 import { ConnectionGraphService, PinSummary, PinmapCatalog, ComponentInstanceInput, ComponentConfig, PinmapProtocol } from '../../../services/connection-graph.service';
-import { injectTodoReminder } from './todoWriteTool';
+import { AilyHost } from '../core/host';
 
 /**
  * 解析后的组件实例信息（内部使用）
@@ -473,7 +473,7 @@ CONNECT board.SCL -> dht.SCL @i2c
       is_error: false,
       content: JSON.stringify(result, null, 2),
     };
-    return injectTodoReminder(toolResult, 'generate_schematic');
+    return toolResult;
   } catch (error: any) {
     return {
       is_error: true,
@@ -581,7 +581,7 @@ export async function getPinmapSummaryTool(
       is_error: false,
       content: JSON.stringify(result, null, 2),
     };
-    return injectTodoReminder(toolResult, 'get_pinmap_summary');
+    return toolResult;
   } catch (error: any) {
     return {
       is_error: true,
@@ -613,7 +613,7 @@ export async function getSensorPinmapCatalogTool(
 
     // node_modules 路径作为 packagesBasePath - 使用字符串拼接确保类型正确
     const packagesBasePath = `${currentProjectPath}/node_modules`;
-    if (!window['fs'].existsSync(packagesBasePath)) {
+    if (!AilyHost.get().fs.existsSync(packagesBasePath)) {
       return {
         is_error: true,
         content: '项目的 node_modules 目录不存在，请先安装依赖。',
@@ -810,7 +810,7 @@ export async function getSensorPinmapCatalogTool(
       is_error: false,
       content: JSON.stringify(resultContent, null, 2),
     };
-    return injectTodoReminder(toolResult, 'get_component_catalog');
+    return toolResult;
   } catch (error: any) {
     return {
       is_error: true,
@@ -895,7 +895,7 @@ export async function validateConnectionGraphTool(
       is_error: false,
       content: JSON.stringify(result, null, 2),
     };
-    return injectTodoReminder(toolResult, 'validate_schematic');
+    return toolResult;
   } catch (error: any) {
     return {
       is_error: true,
@@ -1065,7 +1065,7 @@ export async function generatePinmapTool(
       is_error: false,
       content: JSON.stringify(result, null, 2),
     };
-    return injectTodoReminder(toolResult, 'generate_pinmap');
+    return toolResult;
   } catch (error: any) {
     return {
       is_error: true,
@@ -1154,7 +1154,7 @@ export async function savePinmapTool(
       is_error: false,
       content: JSON.stringify(result, null, 2),
     };
-    return injectTodoReminder(toolResult, 'save_pinmap');
+    return toolResult;
   } catch (error: any) {
     return {
       is_error: true,
@@ -1214,7 +1214,7 @@ export async function getCurrentSchematicTool(
       is_error: false,
       content: JSON.stringify(result, null, 2),
     };
-    return injectTodoReminder(toolResult, 'get_current_schematic');
+    return toolResult;
   } catch (error: any) {
     return {
       is_error: true,
@@ -1539,7 +1539,7 @@ export async function applySchematicTool(
       is_error: false,
       content: JSON.stringify(result, null, 2),
     };
-    return injectTodoReminder(toolResult, 'apply_schematic');
+    return toolResult;
   } catch (error: any) {
     return {
       is_error: true,

@@ -238,13 +238,31 @@ export class RepetitionDetectionService {
 
   /**
    * 生成参数哈希（用于比较参数是否相同）
+   * 使用深层排序确保 key 顺序不同的等价对象产生相同 hash
    */
   private hashArgs(args: any): string {
     try {
-      return JSON.stringify(args, Object.keys(args || {}).sort());
+      return JSON.stringify(this.sortKeysDeep(args));
     } catch (e) {
       return String(args);
     }
+  }
+
+  /**
+   * 递归对对象的 key 进行排序，确保序列化结果稳定
+   */
+  private sortKeysDeep(value: any): any {
+    if (value === null || value === undefined || typeof value !== 'object') {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map(item => this.sortKeysDeep(item));
+    }
+    const sorted: Record<string, any> = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = this.sortKeysDeep(value[key]);
+    }
+    return sorted;
   }
 
   // ==================== 流式文本重复检测 ====================
@@ -263,7 +281,6 @@ export class RepetitionDetectionService {
     if (token.includes('</think>')) {
       this.insideThink = false;
       this.thinkTokens = [];
-      return { isRepetitive: false };
     }
 
     // 统一加入 streamTokens（保持索引一致性）
@@ -292,7 +309,11 @@ export class RepetitionDetectionService {
       if (this.thinkTokens.length < this.MIN_TOKENS_FOR_DETECTION) {
         return { isRepetitive: false };
       }
-
+      // Think Layer 0: 垃圾 token 重复（\t\t\t...、\t}\t}... 等卡顿信号）
+      const thinkJunkResult = this.checkJunkTokenRepetition(this.thinkTokens);
+      if (thinkJunkResult.isRepetitive) {
+        return thinkJunkResult;
+      }
       // Think Layer 1: 短语连续重复（“让我思考让我思考让我思考...”）
       const thinkPhraseResult = this.checkPhraseRepetitionOn(this.thinkTokens);
       if (thinkPhraseResult.isRepetitive) {
@@ -303,6 +324,12 @@ export class RepetitionDetectionService {
       const thinkSentenceResult = this.checkConsecutiveSentenceRepetitionOn(this.thinkTokens);
       if (thinkSentenceResult.isRepetitive) {
         return thinkSentenceResult;
+      }
+
+      // Think Layer 3: 段落块循环重复（ABCDABCD...整段重复）
+      const thinkParagraphResult = this.checkParagraphCycleRepetitionOn(this.thinkTokens);
+      if (thinkParagraphResult.isRepetitive) {
+        return thinkParagraphResult;
       }
 
       return { isRepetitive: false };
@@ -318,6 +345,12 @@ export class RepetitionDetectionService {
       return { isRepetitive: false };
     }
 
+    // Layer 0: 垃圾 token 重复（\t\t\t...、\t}\t}...、}\r}\r... 等卡顿信号）
+    const junkResult = this.checkJunkTokenRepetition(this.streamTokens);
+    if (junkResult.isRepetitive) {
+      return junkResult;
+    }
+
     // Layer 1: Token 级连续短语重复（"哈哈哈哈哈" 或 token 卡顿）
     const phraseResult = this.checkPhraseRepetition();
     if (phraseResult.isRepetitive) {
@@ -328,6 +361,12 @@ export class RepetitionDetectionService {
     const sentenceResult = this.checkConsecutiveSentenceRepetition();
     if (sentenceResult.isRepetitive) {
       return sentenceResult;
+    }
+
+    // Layer 2.5: 段落块循环重复（ABCDABCD... 多句段落整体重复）
+    const paragraphResult = this.checkParagraphCycleRepetition();
+    if (paragraphResult.isRepetitive) {
+      return paragraphResult;
     }
 
     // Layer 3: 内容块跨边界重复（<think>/tool_call 前后相同内容块）
@@ -449,6 +488,61 @@ export class RepetitionDetectionService {
     return null;
   }
 
+  /**
+   * 检测垃圾 token 重复（全局）
+   * 包括纯空白字符重复（\t\t\t...）、控制字符+符号的短模式重复（\t}\t}...、}\r}\r...）
+   * 即使在正常输出中，高频重复的空白/控制字符也是模型卡顿信号
+   */
+  private checkJunkTokenRepetition(tokens: string[]): RepetitionCheckResult {
+    const text = tokens.join('');
+
+    if (text.length < 15) {
+      return { isRepetitive: false };
+    }
+
+    const checkLength = Math.min(text.length, 200);
+    const checkText = text.slice(-checkLength);
+
+    // 检测 1-5 字符的短模式重复（不过滤空白和控制字符）
+    for (let patternLen = 1; patternLen <= Math.min(5, Math.floor(checkText.length / 5)); patternLen++) {
+      const pattern = checkText.slice(-patternLen);
+
+      let consecutiveCount = 0;
+      let pos = checkText.length;
+
+      while (pos >= patternLen) {
+        if (checkText.slice(pos - patternLen, pos) === pattern) {
+          consecutiveCount++;
+          pos -= patternLen;
+        } else {
+          break;
+        }
+      }
+
+      // 阈值根据模式长度调整
+      let threshold: number;
+      if (patternLen === 1) {
+        threshold = 50; // 50 个相同字符（如 \t\t\t...）
+      } else if (patternLen === 2) {
+        threshold = 8;  // 8 次 2 字符模式（如 \t}\t}...）
+      } else {
+        threshold = 5;  // 5 次 3-5 字符模式
+      }
+
+      if (consecutiveCount >= threshold) {
+        // 将控制字符转义为可读形式
+        const displayPattern = JSON.stringify(pattern).slice(1, -1);
+        return {
+          isRepetitive: true,
+          pattern: `垃圾 token 重复: "${displayPattern}" × ${consecutiveCount}`,
+          suggestion: '模型可能陷入了无意义的输出循环。'
+        };
+      }
+    }
+
+    return { isRepetitive: false };
+  }
+
   // -------------------- Layer 2: 句子级连续重复 --------------------
 
   /**
@@ -530,6 +624,82 @@ export class RepetitionDetectionService {
     return { isRepetitive: false };
   }
 
+  // -------------------- Layer 2.5: 段落块循环重复 --------------------
+
+  /**
+   * 检测段落块循环重复
+   * 主缓冲区入口，委托给参数化版本
+   */
+  private checkParagraphCycleRepetition(): RepetitionCheckResult {
+    return this.checkParagraphCycleRepetitionOn(this.streamTokens);
+  }
+
+  /**
+   * 在指定 token 数组上检测段落块循环重复
+   * 场景：模型反复输出相同的 N 句话组成的段落（ABCDABCDABCD...）
+   * 与 Layer 2 不同点：Layer 2 检测单句重复（AAAA），本层检测多句组成的块整体重复
+   */
+  private checkParagraphCycleRepetitionOn(tokens: string[]): RepetitionCheckResult {
+    const text = tokens.join('');
+
+    // 段落块至少需要足够长的文本（3 次重复 × 至少 2 句 × 平均 30 字 ≈ 180 字符）
+    if (text.length < 150) {
+      return { isRepetitive: false };
+    }
+
+    const sentences = this.splitIntoSentences(text);
+
+    // 至少需要 6 个句子（最小 blockSize=2 × 3 次重复）
+    if (sentences.length < 6) {
+      return { isRepetitive: false };
+    }
+
+    const normalized = sentences.map(s => this.normalizeSentence(s));
+
+    // 尝试不同的块大小（2~10 句为一个块）
+    const maxBlockSize = Math.min(10, Math.floor(normalized.length / 3));
+
+    for (let blockSize = 2; blockSize <= maxBlockSize; blockSize++) {
+      // 取末尾 blockSize 个句子作为模式块
+      const patternBlock = normalized.slice(-blockSize);
+
+      // 从末尾往前匹配完整的块
+      let matchCount = 1; // 模式块本身算 1 次
+      let pos = normalized.length - blockSize;
+
+      while (pos >= blockSize) {
+        const candidate = normalized.slice(pos - blockSize, pos);
+        let isMatch = true;
+        for (let i = 0; i < blockSize; i++) {
+          if (candidate[i] !== patternBlock[i]) {
+            isMatch = false;
+            break;
+          }
+        }
+        if (isMatch) {
+          matchCount++;
+          pos -= blockSize;
+        } else {
+          break;
+        }
+      }
+
+      // 块重复 3 次以上即触发
+      if (matchCount >= 3) {
+        const displaySentence = sentences[sentences.length - blockSize].length > 30
+          ? sentences[sentences.length - blockSize].substring(0, 30) + '...'
+          : sentences[sentences.length - blockSize];
+        return {
+          isRepetitive: true,
+          pattern: `${blockSize} 句段落块连续循环 ${matchCount} 次: "${displaySentence}"...`,
+          suggestion: '检测到相同段落的循环重复输出。'
+        };
+      }
+    }
+
+    return { isRepetitive: false };
+  }
+
   // -------------------- Layer 3: 跨边界块级重复 --------------------
 
   /**
@@ -541,7 +711,13 @@ export class RepetitionDetectionService {
    * - 'think_end': </think> 结束，不保存内容（think 内容丢弃），只更新索引
    */
   markBoundary(type: 'tool_call' | 'think_start' | 'think_end' = 'tool_call'): void {
-    if (type === 'think_end') {
+    // 同步 insideThink 状态（防止 token 拆分导致 checkStreamRepetition 内的 includes 检测失败）
+    if (type === 'think_start') {
+      this.insideThink = true;
+      this.thinkTokens = [];
+    } else if (type === 'think_end') {
+      this.insideThink = false;
+      this.thinkTokens = [];
       // think 内容不保存为内容块，只更新边界位置
       this.lastBoundaryTokenIndex = this.streamTokens.length;
       return;

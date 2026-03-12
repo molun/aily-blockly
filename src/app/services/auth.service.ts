@@ -399,7 +399,7 @@ export class AuthService {
             const encrypted = (window as any).electronAPI.safeStorage.encryptString(token);
             encryptedToken = encrypted.toString('base64');
           } catch (error) {
-            console.warn('token加密失败，使用明文存储:', error);
+            // console.warn('token加密失败，使用明文存储:', error);
           }
         }
 
@@ -454,7 +454,7 @@ export class AuthService {
           //     return authData.access_token;
           //   }
         } else {
-          console.warn('认证文件不存在:', authFilePath);
+          // console.warn('认证文件不存在:', authFilePath);
           return null;
         }
       } else {
@@ -466,7 +466,7 @@ export class AuthService {
         return localStorage.getItem('aily_auth_token');
       }
     } catch (error) {
-      console.error('获取token失败:', error);
+      // console.warn('获取token失败:', error);
       return null;
     }
   }
@@ -552,7 +552,7 @@ export class AuthService {
         localStorage.setItem(this.USER_INFO_KEY, userInfoStr);
       }
     } catch (error) {
-      console.log('保存用户信息失败:', error);
+      // console.log('保存用户信息失败:', error);
     }
   }
 
