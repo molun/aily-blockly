@@ -67,7 +67,8 @@
         "MULTI_COMPRESS": "Compress to ZIP",
         "LIB_MANAGER": "Library Manager",
         "AI_ASSISTANT": "AI Assistant",
-        "PROJECT_HUB": "Project Hub"
+        "PROJECT_HUB": "Project Hub",
+        "NEW_INSTANCE": "New Instance"
     },
     "ESP32": {
         "UPLOAD_SPEED": "Upload Speed",

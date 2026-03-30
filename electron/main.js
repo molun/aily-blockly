@@ -2,7 +2,7 @@ const path = require("path");
 const os = require("os");
 const fs = require("fs");
 const WinState = require('electron-win-state').default;
-const { app, BrowserWindow, ipcMain, dialog, screen, shell, net } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, screen, shell, net, Menu } = require("electron");
 
 const { isWin32, isDarwin, isLinux } = require("./platform");
 const projectLock = require("./project-lock");
@@ -249,6 +249,23 @@ function getProjectLockStringsForMain() {
   } catch (e) {
     console.warn("getProjectLockStringsForMain:", e);
     return defaults;
+  }
+}
+
+function getMenuStringForMain(key, fallback) {
+  try {
+    const loc = (app.getLocale() || "").toLowerCase();
+    const pack = loc.startsWith("zh") ? "zh_cn" : "en";
+    const fp = path.join(__dirname, `../public/i18n/${pack}/${pack}.json`);
+    if (!fs.existsSync(fp)) {
+      return fallback;
+    }
+    const j = JSON.parse(fs.readFileSync(fp, "utf8"));
+    const v = j.MENU && j.MENU[key];
+    return v || fallback;
+  } catch (e) {
+    console.warn("getMenuStringForMain:", e);
+    return fallback;
   }
 }
 
@@ -1455,8 +1472,8 @@ if (shouldUseMultiInstance()) {
   }
 }
 
-// TODO: 增加快捷任务栏任务，仅 Windows 支持（macOS/Linux 无 app.setUserTasks）
-if (process.platform === "win32" && typeof app.setUserTasks === "function") {
+// Windows 任务栏跳转列表（Jump List），仅 Windows 有效；macOS 无对应 API，多开见 Dock 菜单「新建实例」或终端 `open -n`。
+if (typeof app.setUserTasks === "function") {
   // app.setUserTasks([
   //   {
   //     program: process.execPath,
@@ -1507,6 +1524,10 @@ app.on("ready", async () => {
     initFastestServersAsync();
   } catch (error) {
     console.error("loadEnv error: ", error);
+  }
+
+  if (isDarwin && app.dock) {
+    setupDarwinDockMenu();
   }
 
   if (protocolUrl) {
@@ -1768,53 +1789,59 @@ ipcMain.handle("move-to-trash", async (event, filePath) => {
   }
 })
 
+function spawnNewAppInstance(data) {
+  const { route, queryParams } = data || {};
+  const args = ["--new-instance"];
+  if (route) {
+    args.push(`--route=${route}`);
+  }
+  if (queryParams) {
+    args.push(`--query=${encodeURIComponent(JSON.stringify(queryParams))}`);
+  }
+  const { spawn } = require("child_process");
+  const execPath = process.execPath;
+  const appPath = app.getAppPath();
+  const spawnArgs = [appPath, ...args];
+  console.log("启动新实例:", execPath, spawnArgs);
+  const child = spawn(execPath, spawnArgs, {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  return { success: true, pid: child.pid };
+}
+
+function setupDarwinDockMenu() {
+  if (!isDarwin || !app.dock) {
+    return;
+  }
+  const label = getMenuStringForMain("NEW_INSTANCE", "New Instance");
+  app.dock.setMenu(
+    Menu.buildFromTemplate([
+      {
+        label,
+        click: () => {
+          spawnNewAppInstance({});
+        },
+      },
+    ])
+  );
+}
+
 // 打开新实例
 ipcMain.handle("open-new-instance", async (event, data) => {
   try {
-    const { route, queryParams } = data || {};
-
-    // 构建命令行参数
-    const args = ['--new-instance']; // 添加强制新实例标志
-
-    // 如果有路由参数，将其作为环境变量传递
-    if (route) {
-      args.push(`--route=${route}`);
-    }
-
-    // 如果有查询参数，将其序列化后传递
-    if (queryParams) {
-      args.push(`--query=${encodeURIComponent(JSON.stringify(queryParams))}`);
-    }
-
-    // 启动新实例
-    const { spawn } = require('child_process');
-    const execPath = process.execPath;
-    const appPath = app.getAppPath();
-
-    // 构建完整的启动参数
-    const spawnArgs = [appPath, ...args];
-
-    console.log('启动新实例:', execPath, spawnArgs);
-
-    const child = spawn(execPath, spawnArgs, {
-      detached: true,
-      stdio: 'ignore'
-    });
-
-    // 分离子进程，使其独立运行
-    child.unref();
-
+    const result = spawnNewAppInstance(data);
     return {
       success: true,
-      pid: child.pid,
-      message: '新实例已启动'
+      pid: result.pid,
+      message: "新实例已启动",
     };
-
   } catch (error) {
-    console.error('启动新实例失败:', error);
+    console.error("启动新实例失败:", error);
     return {
       success: false,
-      error: error.message
+      error: error.message,
     };
   }
 })
