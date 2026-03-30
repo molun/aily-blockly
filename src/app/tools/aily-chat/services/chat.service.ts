@@ -5,6 +5,7 @@ import { MCPTool } from './mcp.service';
 import { ChatAPI } from '../core/api-endpoints';
 import { AilyChatConfigService, ModelConfigOption } from './aily-chat-config.service';
 import { AilyHost } from '../core/host';
+import { isTransientNetworkError, isLikelySessionLostError } from './http-error-handler.service';
 
 // 使用 ModelConfigOption 作为统一的模型配置类型，保留 ModelConfig 别名以兼容旧代码
 export type ModelConfig = ModelConfigOption;
@@ -503,6 +504,7 @@ export class ChatService {
     return new Observable(observer => {
       let aborted = false;
       let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+      const abortCtrl = new AbortController();
 
       // 获取 token 并添加 Authorization 头部
       AilyHost.get().auth.getToken!().then(token => {
@@ -513,7 +515,7 @@ export class ChatService {
           headers['Authorization'] = `Bearer ${token}`;
         }
 
-        fetch(`${ChatAPI.streamConnect}/${sessionId}`, { headers })
+        fetch(`${ChatAPI.streamConnect}/${sessionId}`, { headers, signal: abortCtrl.signal })
           .then(async response => {
           if (aborted) return;
 
@@ -568,12 +570,12 @@ export class ChatService {
               observer.complete();
             }
           } catch (error) {
-            if (!aborted) {
-              observer.error(error);
-            }
+            if ((error as Error)?.name === 'AbortError' || aborted) return;
+            observer.error(error);
           }
         })
         .catch(error => {
+          if ((error as Error)?.name === 'AbortError') return;
           if (!aborted) {
             observer.error(error);
           }
@@ -587,6 +589,7 @@ export class ChatService {
       // 返回清理函数，在取消订阅时调用
       return () => {
         aborted = true;
+        abortCtrl.abort();
         if (reader) {
           reader.cancel().catch(() => {});
         }
@@ -624,6 +627,7 @@ export class ChatService {
     return new Observable(observer => {
       let aborted = false;
       let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+      const abortCtrl = new AbortController();
 
       const payload: any = {
         session_id: sessionId,
@@ -666,50 +670,65 @@ export class ChatService {
           headers['X-Debug-Force-Error'] = debugForceErrorCode;
         }
 
-        fetch(`${ChatAPI.chatRequest}/${sessionId}`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload)
-        })
-          .then(async response => {
+        const requestBody = JSON.stringify(payload);
+
+        const MAX_NETWORK_RETRIES = 3;
+        const RETRY_BASE_DELAY = 2000; // ms
+        const RETRY_INITIAL_DELAY = 3000; // ms — 首次重试多等一会，服务重启通常需要几秒
+
+        const attemptFetch = async (attempt: number): Promise<void> => {
+          try {
+            const response = await fetch(`${ChatAPI.chatRequest}/${sessionId}`, {
+              method: 'POST',
+              headers,
+              body: requestBody,
+              signal: abortCtrl.signal
+            });
             if (aborted) return;
 
             let streamResponse = response;
             if (!response.ok) {
               const errorBody = await this.readHttpErrorBody(response);
+              const normalizedErr = this.createNormalizedHttpError(response, errorBody);
 
-              if (response.status === 404) {
+              // 会话丢失（404/21001 或 500 通用错误）→ 重建会话并重试
+              if (isLikelySessionLostError(normalizedErr) && attempt === 0) {
                 try {
-                  if (errorBody && errorBody.code === 21001) {
-                    // 会话不存在（服务器重启导致），透明地重建会话并重试请求
-                    await this.startSession(mode, tools as any, maxCount, llmConfig, selectModel).toPromise();
-                    if (aborted) return;
-                    const retryResp = await fetch(`${ChatAPI.chatRequest}/${sessionId}`, {
-                      method: 'POST',
-                      headers,
-                      body: JSON.stringify(payload)
-                    });
-                    if (aborted) return;
-                    if (!retryResp.ok) {
-                      const retryErrorBody = await this.readHttpErrorBody(retryResp);
-                      observer.error(this.createNormalizedHttpError(
-                        retryResp,
-                        retryErrorBody,
-                        `HTTP error after session restart! Status: ${retryResp.status}`
-                      ));
-                      return;
-                    }
-                    streamResponse = retryResp;
-                  } else {
-                    observer.error(this.createNormalizedHttpError(response, errorBody));
+                  console.warn(`[chatRequest] 检测到会话可能丢失 (HTTP ${response.status})，重建会话...`);
+                  await this.startSession(mode, tools as any, maxCount, llmConfig, selectModel).toPromise();
+                  if (aborted) return;
+                  const retryResp = await fetch(`${ChatAPI.chatRequest}/${sessionId}`, {
+                    method: 'POST',
+                    headers,
+                    body: requestBody,
+                    signal: abortCtrl.signal
+                  });
+                  if (aborted) return;
+                  if (!retryResp.ok) {
+                    const retryErrorBody = await this.readHttpErrorBody(retryResp);
+                    observer.error(this.createNormalizedHttpError(
+                      retryResp,
+                      retryErrorBody,
+                      `HTTP error after session restart! Status: ${retryResp.status}`
+                    ));
                     return;
                   }
+                  streamResponse = retryResp;
                 } catch (retryErr) {
                   if (!aborted) observer.error(retryErr);
                   return;
                 }
+              } else if (isTransientNetworkError(normalizedErr) && attempt < MAX_NETWORK_RETRIES) {
+                // 502/503/504 + 连接类错误消息 → 瞬态，可重试
+                const delay = attempt === 0 ? RETRY_INITIAL_DELAY : RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
+                console.warn(`[chatRequest] HTTP ${response.status} 瞬态错误，${delay}ms 后第 ${attempt + 1} 次重试`);
+                await new Promise(r => setTimeout(r, delay));
+                if (!aborted) {
+                  return attemptFetch(attempt + 1);
+                }
+                return;
               } else {
-                observer.error(this.createNormalizedHttpError(response, errorBody));
+                observer.error(normalizedErr);
                 return;
               }
             }
@@ -758,16 +777,28 @@ export class ChatService {
                 observer.complete();
               }
             } catch (error) {
-              if (!aborted) {
-                observer.error(error);
-              }
+              if ((error as Error)?.name === 'AbortError' || aborted) return;
+              observer.error(error);
             }
-          })
-          .catch(error => {
+          } catch (error) {
+            if ((error as Error)?.name === 'AbortError' || aborted) return;
+            // 瞬态网络错误自动重试（如 TypeError: network）
+            if (isTransientNetworkError(error) && attempt < MAX_NETWORK_RETRIES) {
+              const delay = attempt === 0 ? RETRY_INITIAL_DELAY : RETRY_BASE_DELAY * Math.pow(2, attempt - 1);
+              console.warn(`[chatRequest] 网络错误，${delay}ms 后第 ${attempt + 1} 次重试:`, (error as Error).message);
+              await new Promise(r => setTimeout(r, delay));
+              if (!aborted) {
+                return attemptFetch(attempt + 1);
+              }
+              return;
+            }
             if (!aborted) {
               observer.error(error);
             }
-          });
+          }
+        };
+
+        attemptFetch(0);
       }).catch(error => {
         if (!aborted) {
           observer.error(error);
@@ -777,6 +808,7 @@ export class ChatService {
       // 返回清理函数，在取消订阅时调用
       return () => {
         aborted = true;
+        abortCtrl.abort();
         if (reader) {
           reader.cancel().catch(() => {});
         }
