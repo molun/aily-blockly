@@ -10,6 +10,7 @@ import { ToolCallState } from '../core/chat-types';
 import { AilyHost } from '../core/host';
 import { isDeferredTool } from '../tools/tools';
 import { formatHookContext } from '../services/chat-hook.service';
+import { ChatPerformanceTracer } from '../services/chat-perf-tracer';
 
 export class ToolCallLoopHelper {
   /** 发送前准备好的消息（瞬态，仅承载未持久化的普通裁剪结果） */
@@ -82,7 +83,8 @@ export class ToolCallLoopHelper {
   // ==================== turn 发起 ====================
 
   async startChatTurn(): Promise<void> {
-    if (this.engine.isCancelled) { this.engine.isWaiting = false; return; }
+    const _turnSpan = ChatPerformanceTracer.begin('startChatTurn', `iter=${this.engine.toolCallingIteration}`);
+    if (this.engine.isCancelled) { this.engine.isWaiting = false; ChatPerformanceTracer.end(_turnSpan, 'startChatTurn', 'cancelled'); return; }
 
     const toolCallLimit = this.engine.ailyChatConfigService.maxCount;
     if (this.engine.toolCallingIteration >= toolCallLimit) {
@@ -112,7 +114,14 @@ export class ToolCallLoopHelper {
     }
 
     this.engine.contextBudgetService.updateModelContextSize(this.engine.currentModel?.model || null);
-    this.engine.contextBudgetService.updateBudget(this.engine.conversationMessages, this.getCurrentTools());
+    // P0-perf: 直接调用 buildMessages() 一次并缓存，避免通过 conversationMessages getter 重复触发
+    const _bmSpan = ChatPerformanceTracer.begin('buildMessages');
+    const cachedMessages = this.engine.turnManager.buildMessages();
+    ChatPerformanceTracer.end(_bmSpan, 'buildMessages', `${cachedMessages.length} msgs`);
+    // Method C: 异步 token 计数，长文本卸载到 Worker 避免阻塞 UI
+    const _budgetSpan = ChatPerformanceTracer.begin('updateBudgetAsync');
+    await this.engine.contextBudgetService.updateBudgetAsync(cachedMessages, this.getCurrentTools());
+    ChatPerformanceTracer.end(_budgetSpan, 'updateBudgetAsync');
 
     const preCompressBudget = this.engine.contextBudgetService.getSnapshot();
 
@@ -149,13 +158,17 @@ export class ToolCallLoopHelper {
     }
 
     try {
-      const currentMessages = this.engine.turnManager.buildMessages();
+      // P0-perf: 复用 cachedMessages，不再重复调用 buildMessages()
       const turnSpans = this.engine.turnManager.turnSpans;
+      const _compressSpan = ChatPerformanceTracer.begin('compressIfNeeded');
       const compressed = await this.engine.contextBudgetService.compressIfNeeded(
-        currentMessages, this.engine.sessionId, this.engine.turnManager,
+        cachedMessages, this.engine.sessionId, this.engine.turnManager,
         this.getCurrentLLMConfig(), this.engine.currentModel?.model || undefined,
-        turnSpans
+        turnSpans,
+        preCompressBudget.messagesTokens
       );
+      ChatPerformanceTracer.end(_compressSpan, 'compressIfNeeded');
+      // compress 可能修改了 turnManager 内部状态，获取最新的 canonical messages
       const canonicalMessages = this.engine.turnManager.buildMessages();
       this._preparedMessages = compressed === canonicalMessages ? null : compressed;
       if (showCompressionState) {
@@ -196,14 +209,16 @@ export class ToolCallLoopHelper {
     }
 
     // 压缩期间用户可能已取消，再次检查
-    if (this.engine.isCancelled) { this.engine.isWaiting = false; return; }
+    if (this.engine.isCancelled) { this.engine.isWaiting = false; ChatPerformanceTracer.end(_turnSpan, 'startChatTurn', 'cancelled_post_compress'); return; }
 
+    ChatPerformanceTracer.end(_turnSpan, 'startChatTurn', 'streamConnect');
     this.engine.stream.streamConnect(true);
   }
 
   // ==================== 循环迭代 ====================
 
   continueToolCallingLoop(): void {
+    ChatPerformanceTracer.mark('continueToolCallingLoop', `iter=${this.engine.toolCallingIteration}`);
     // Turn 结构化存储：记录本轮工具调用
     if (this.engine.currentTurnToolCalls.length > 0) {
       this.engine.turnManager.addToolCallRound(
@@ -226,13 +241,15 @@ export class ToolCallLoopHelper {
     }
 
     this.engine.toolCallingIteration++;
-    this.engine.contextBudgetService.updateBudget(this.engine.conversationMessages, this.getCurrentTools());
-    this.startChatTurn();
+    // P0-perf: yield 一帧让 UI 更新（显示 pending 状态），再执行重计算
+    // 移除了此处的 updateBudget（startChatTurn 开头会做同样的调用）
+    setTimeout(() => this.startChatTurn(), 0);
   }
 
   // ==================== 完成回调 ====================
 
   onToolExecutionComplete(): void {
+    ChatPerformanceTracer.mark('onToolExecutionComplete', `active=${this.engine.activeToolExecutions - 1}, sseComplete=${this.engine.sseStreamCompleted}`);
     this.engine.activeToolExecutions--;
     // 取消后不再触发循环迭代（stop() 已负责保存已完成的结果）
     if (this.engine.isCancelled) return;
@@ -241,7 +258,7 @@ export class ToolCallLoopHelper {
     }
   }
 
-  finalizeStatelessTurn(): void {
+  async finalizeStatelessTurn(): Promise<void> {
     if (this.engine.pendingToolResults.length > 0 && !this.engine.isCancelled) {
       this.continueToolCallingLoop();
     } else {
@@ -251,7 +268,7 @@ export class ToolCallLoopHelper {
         this.engine.hookService.executeStop({
           stopHookActive: this._stopHookActive,
           toolCallingIteration: this.engine.toolCallingIteration,
-        }).then(stopResult => {
+        }).then(async (stopResult) => {
           if (stopResult.shouldContinue && stopResult.reasons && stopResult.reasons.length > 0) {
             // 参考 Copilot: 将 Hook 原因格式化为 user 消息，注入下轮
             this._stopHookReason = formatHookContext(stopResult.reasons);
@@ -270,28 +287,31 @@ export class ToolCallLoopHelper {
             return;
           }
           // Hook 未阻止，正常完成
-          this._doFinalize();
-        }).catch(err => {
+          await this._doFinalize();
+        }).catch(async (err) => {
           console.error('[Hook] Stop hook 执行异常，正常完成:', err);
-          this._doFinalize();
+          await this._doFinalize();
         });
         return;
       }
 
-      this._doFinalize();
+      await this._doFinalize();
     }
   }
 
   /**
    * 实际完成逻辑（从 finalizeStatelessTurn 抽取，供 Hook 流程复用）
    */
-  private _doFinalize(): void {
+  private async _doFinalize(): Promise<void> {
     // Turn 结构化存储：最终 assistant 响应
     this.engine.turnManager.finalizeTurn(this.engine.currentTurnAssistantContent || '');
-    this.engine.contextBudgetService.updateBudget(this.engine.conversationMessages, this.getCurrentTools());
+    // P0-perf: 构建一次 messages 并复用，避免通过 getter 重复触发 buildMessages()
+    const finalMessages = this.engine.turnManager.buildMessages();
+    // Method C: 异步 token 计数
+    await this.engine.contextBudgetService.updateBudgetAsync(finalMessages, this.getCurrentTools());
     const budget = this.engine.contextBudgetService.getSnapshot();
     this.engine.contextBudgetService.backgroundSummarizer.checkAndTrigger(
-      this.engine.conversationMessages, budget.maxContextTokens, budget.currentTokens,
+      finalMessages, budget.maxContextTokens, budget.currentTokens,
       this.engine.sessionId, this.engine.turnManager,
       this.getCurrentLLMConfig(), this.engine.currentModel?.model || undefined
     );
@@ -311,11 +331,11 @@ export class ToolCallLoopHelper {
       }
     }
 
-    if (this.engine.list.length > 0 && this.engine.list[this.engine.list.length - 1].role === 'aily') {
-      this.engine.list[this.engine.list.length - 1].state = 'done';
-    }
-    this.engine.isWaiting = false;
-    this.engine.isCompleted = true;
+    this.engine.viewAdapter.markLastMessageDone();
+    this.engine.ngZone.run(() => {
+      this.engine.isWaiting = false;
+      this.engine.isCompleted = true;
+    });
     this.engine.session.saveCurrentSession();
     if (!AilyHost.get().electron?.isWindowFocused()) {
       AilyHost.get().electron?.notify('Aily', '对话已完成');

@@ -38,6 +38,8 @@ export interface RepetitionCheckResult {
   suggestion?: string;
   /** think 状态转换信息（供调用方同步 UI 状态） */
   thinkTransition?: 'entered' | 'exited';
+  /** 非阻塞式大小警告（不中断流，由调用方在流中注入提示） */
+  sizeWarning?: string;
 }
 
 /**
@@ -224,8 +226,30 @@ export class RepetitionDetectionService {
   /** Think 内部独立的 token 缓冲区（不污染主缓冲区） */
   private thinkTokens: string[] = [];
 
+  /** ★ 性能优化：缓存 thinkTokens.join('') */
+  private _cachedThinkText: string | null = null;
+
+  /** 获取 thinkTokens 的 join 结果（使用缓存） */
+  private getThinkText(): string {
+    if (this._cachedThinkText === null) {
+      this._cachedThinkText = this.thinkTokens.join('');
+    }
+    return this._cachedThinkText;
+  }
+
+  /** ★ 性能优化：缓存 streamTokens.join('') */
+  private _cachedStreamText: string | null = null;
+
+  /** 获取 streamTokens 的 join 结果（使用缓存） */
+  private getStreamText(): string {
+    if (this._cachedStreamText === null) {
+      this._cachedStreamText = this.streamTokens.join('');
+    }
+    return this._cachedStreamText;
+  }
+
   /** Think 缓冲区最大长度 */
-  private readonly MAX_THINK_TOKENS = 300;
+  private readonly MAX_THINK_TOKENS = 1500;
 
   /** Think 内检测间隔（每 N 个 token 检测一次） */
   private readonly THINK_CHECK_INTERVAL = 8;
@@ -235,8 +259,40 @@ export class RepetitionDetectionService {
   /** 标签检测缓冲区（处理跨 token 的 <think>/<\/think> 标签拆分） */
   private tagBuffer = '';
 
+  // ==================== 兜底：单次 SSE 输出总大小限制 ====================
+
+  /** 单次 SSE 响应累积的总字节数 */
+  private totalStreamBytes = 0;
+
+  /** 大小软警告间隔（每 3MB 发出一次非阻塞警告） */
+  private readonly SIZE_WARNING_INTERVAL_BYTES = 3 * 1024 * 1024;
+
+  /** 单次 SSE 响应绝对上限（5MB），超过即强制中断 */
+  private readonly MAX_SINGLE_RESPONSE_BYTES = 5 * 1024 * 1024;
+
+  /** 下一次触发大小警告的字节阈值（每次警告后递增一个 interval） */
+  private nextSizeWarningBytes = this.SIZE_WARNING_INTERVAL_BYTES;
+
   /** 非 Think 内容的 token 缓冲区（Layer 1/4/5 只在此缓冲区上检测，避免 think 内容污染） */
   private nonThinkStreamTokens: string[] = [];
+
+  /**
+   * ★ 性能优化：缓存 nonThinkStreamTokens.join('') 的结果。
+   * 每次 checkStreamRepetition 最多需要 join 6+ 次，缓存后仅按需增量更新。
+   * 在 token 追加时增量拼接，在 trim/reset 时置 null 重建。
+   */
+  private _cachedNonThinkText: string | null = null;
+
+  /** ★ 性能优化：增量跟踪 ``` 出现次数，避免每次全文 regex 扫描 */
+  private _fenceCount = 0;
+
+  /** 获取 nonThinkStreamTokens 的 join 结果（使用缓存） */
+  private getNonThinkText(): string {
+    if (this._cachedNonThinkText === null) {
+      this._cachedNonThinkText = this.nonThinkStreamTokens.join('');
+    }
+    return this._cachedNonThinkText;
+  }
 
   /** 本次 checkStreamRepetition 调用中发生的 think 转换 */
   private lastThinkTransition: 'entered' | 'exited' | null = null;
@@ -290,6 +346,7 @@ export class RepetitionDetectionService {
         this.markBoundary('think_start');
         this.insideThink = true;
         this.thinkTokens = [];
+        this._cachedThinkText = null;
         this.lastThinkTransition = 'entered';
       }
 
@@ -323,22 +380,38 @@ export class RepetitionDetectionService {
 
     if (insideThink) {
       this.thinkTokens.push(text);
+      if (this._cachedThinkText !== null) {
+        this._cachedThinkText += text;
+      }
       if (this.thinkTokens.length > this.MAX_THINK_TOKENS) {
         this.thinkTokens = this.thinkTokens.slice(-this.MAX_THINK_TOKENS);
+        this._cachedThinkText = null; // trim 后缓存失效
       }
       return;
     }
 
     this.nonThinkStreamTokens.push(text);
+    // 增量更新缓存（追加而非重建）
+    if (this._cachedNonThinkText !== null) {
+      this._cachedNonThinkText += text;
+    }
+    // 增量更新 fence 计数
+    { let idx = -1; while ((idx = text.indexOf('```', idx + 1)) !== -1) this._fenceCount++; }
     if (this.nonThinkStreamTokens.length > this.MAX_STREAM_TOKENS) {
       this.nonThinkStreamTokens = this.nonThinkStreamTokens.slice(
         this.nonThinkStreamTokens.length - this.MAX_STREAM_TOKENS
       );
+      this._cachedNonThinkText = null; // trim 后缓存失效，需要重建
+      this._fenceCount = -1; // 标记需要重建
     }
   }
 
   private pushStreamToken(token: string): void {
+    this.totalStreamBytes += token.length;
     this.streamTokens.push(token);
+    if (this._cachedStreamText !== null) {
+      this._cachedStreamText += token;
+    }
 
     if (this.streamTokens.length <= this.MAX_STREAM_TOKENS) {
       return;
@@ -356,6 +429,7 @@ export class RepetitionDetectionService {
     }
 
     this.streamTokens = this.streamTokens.slice(trimCount);
+    this._cachedStreamText = null; // trim 后缓存失效
     this.lastBoundaryTokenIndex = Math.max(0, this.lastBoundaryTokenIndex - trimCount);
   }
 
@@ -380,27 +454,30 @@ export class RepetitionDetectionService {
       return { isRepetitive: false };
     }
 
-    const thinkJunkResult = this.checkJunkTokenRepetition(this.thinkTokens);
+    // ★ 性能优化：预计算一次 join text，传给所有子检查（原来每个子检查各自 join 一次）
+    const thinkText = this.getThinkText();
+
+    const thinkJunkResult = this.checkJunkTokenRepetition(this.thinkTokens, thinkText);
     if (thinkJunkResult.isRepetitive) {
       return thinkJunkResult;
     }
 
-    const thinkPhraseResult = this.checkPhraseRepetitionOn(this.thinkTokens, this.THINK_DETECTION_PROFILE);
+    const thinkPhraseResult = this.checkPhraseRepetitionOn(this.thinkTokens, this.THINK_DETECTION_PROFILE, thinkText);
     if (thinkPhraseResult.isRepetitive) {
       return thinkPhraseResult;
     }
 
-    const thinkSentenceResult = this.checkConsecutiveSentenceRepetitionOn(this.thinkTokens, this.THINK_DETECTION_PROFILE);
+    const thinkSentenceResult = this.checkConsecutiveSentenceRepetitionOn(this.thinkTokens, this.THINK_DETECTION_PROFILE, thinkText);
     if (thinkSentenceResult.isRepetitive) {
       return thinkSentenceResult;
     }
 
-    const thinkParagraphResult = this.checkParagraphCycleRepetitionOn(this.thinkTokens, this.THINK_DETECTION_PROFILE);
+    const thinkParagraphResult = this.checkParagraphCycleRepetitionOn(this.thinkTokens, this.THINK_DETECTION_PROFILE, thinkText);
     if (thinkParagraphResult.isRepetitive) {
       return thinkParagraphResult;
     }
 
-    return this.checkSentenceFrequencyRepetition(this.thinkTokens, this.THINK_DETECTION_PROFILE);
+    return this.checkSentenceFrequencyRepetition(this.thinkTokens, this.THINK_DETECTION_PROFILE, thinkText);
   }
 
   // ==================== 工具调用重复检测 ====================
@@ -1493,10 +1570,29 @@ export class RepetitionDetectionService {
   checkStreamRepetition(token: string): RepetitionCheckResult {
     const chunkResult = this.processStreamChunk(token);
 
+    // Layer -1（兜底）: 绝对上限强制中断
+    if (this.totalStreamBytes > this.MAX_SINGLE_RESPONSE_BYTES) {
+      return {
+        isRepetitive: true,
+        pattern: `单次输出已超过 ${Math.round(this.MAX_SINGLE_RESPONSE_BYTES / 1024 / 1024)}MB (${(this.totalStreamBytes / 1024 / 1024).toFixed(1)}MB)`,
+        suggestion: '输出内容异常庞大，可能存在无限循环。',
+        thinkTransition: this.lastThinkTransition ?? undefined,
+      };
+    }
+
+    // 软警告：每 3MB 发出一次，不中断流
+    let sizeWarning: string | undefined;
+    if (this.totalStreamBytes >= this.nextSizeWarningBytes) {
+      const currentMB = (this.totalStreamBytes / 1024 / 1024).toFixed(1);
+      sizeWarning = `当前单次输出已达 ${currentMB}MB，内容可能存在循环，如需停止请点击取消按钮`;
+      this.nextSizeWarningBytes += this.SIZE_WARNING_INTERVAL_BYTES;
+    }
+
     if (chunkResult.sawThinkContent || chunkResult.thinkClosedInChunk) {
       const thinkResult = this.checkThinkRepetition();
       if (chunkResult.thinkClosedInChunk) {
         this.thinkTokens = [];
+        this._cachedThinkText = null;
       }
       if (thinkResult.isRepetitive) {
         return {
@@ -1507,30 +1603,31 @@ export class RepetitionDetectionService {
     }
 
     if (this.insideThink) {
-      return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined };
+      return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined, sizeWarning };
     }
 
     if (!chunkResult.sawNonThinkContent) {
-      return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined };
+      return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined, sizeWarning };
     }
 
     // 每 N 个 token 检测一次
     if (this.streamTokens.length % this.CHECK_INTERVAL !== 0) {
-      return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined };
+      return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined, sizeWarning };
     }
 
     // 至少需要一定数量的 token 才开始检测
     if (this.streamTokens.length < this.MIN_TOKENS_FOR_DETECTION) {
-      return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined };
+      return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined, sizeWarning };
     }
 
+    // ★ 性能优化：只 join 一次 nonThinkStreamTokens，复用缓存
+    const nonThinkText = this.getNonThinkText();
+
     // Layer 0: 垃圾 token 重复（\t\t\t...、\t}\t}...、}\r}\r... 等卡顿信号）
-    const junkResult = this.checkJunkTokenRepetition(this.nonThinkStreamTokens);
+    const junkResult = this.checkJunkTokenRepetition(this.nonThinkStreamTokens, nonThinkText);
     if (junkResult.isRepetitive) {
       return junkResult;
     }
-
-    const nonThinkText = this.nonThinkStreamTokens.join('');
     const insideMarkdownFence = this.isInsideMarkdownCodeFence(nonThinkText);
 
     // Layer 1: Token 级连续短语重复（"哈哈哈哈哈" 或 token 卡顿）
@@ -1580,7 +1677,7 @@ export class RepetitionDetectionService {
       return lineResult;
     }
 
-    return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined };
+    return { isRepetitive: false, thinkTransition: this.lastThinkTransition ?? undefined, sizeWarning };
   }
 
   // -------------------- Layer 1: 短语连续重复 --------------------
@@ -1590,15 +1687,15 @@ export class RepetitionDetectionService {
    * 用于检测 "ABCABCABC" 这种纯粹的连续重复
    */
   private checkPhraseRepetition(): RepetitionCheckResult {
-    return this.checkPhraseRepetitionOn(this.nonThinkStreamTokens, this.PROSE_DETECTION_PROFILE);
+    return this.checkPhraseRepetitionOn(this.nonThinkStreamTokens, this.PROSE_DETECTION_PROFILE, this.getNonThinkText());
   }
 
   /**
    * 在指定 token 数组上检测短语连续重复
    * 供主缓冲区和 think 缓冲区复用
    */
-  private checkPhraseRepetitionOn(tokens: string[], profile: NarrativeDetectionProfile): RepetitionCheckResult {
-    const text = tokens.join('');
+  private checkPhraseRepetitionOn(tokens: string[], profile: NarrativeDetectionProfile, precomputedText?: string): RepetitionCheckResult {
+    const text = precomputedText ?? tokens.join('');
     const analyzableText = this.extractNarrativeText(text);
 
     if (analyzableText.length < profile.phraseMinTextLength) {
@@ -1698,8 +1795,8 @@ export class RepetitionDetectionService {
    * 包括纯空白字符重复（\t\t\t...）、控制字符+符号的短模式重复（\t}\t}...、}\r}\r...）
    * 即使在正常输出中，高频重复的空白/控制字符也是模型卡顿信号
    */
-  private checkJunkTokenRepetition(tokens: string[]): RepetitionCheckResult {
-    const text = tokens.join('');
+  private checkJunkTokenRepetition(tokens: string[], precomputedText?: string): RepetitionCheckResult {
+    const text = precomputedText ?? tokens.join('');
 
     if (text.length < 15) {
       return { isRepetitive: false };
@@ -1790,7 +1887,7 @@ export class RepetitionDetectionService {
    * 例如："请问有什么帮助？请问有什么帮助？请问有什么帮助？" → 3 次连续
    */
   private checkConsecutiveSentenceRepetition(profile: NarrativeDetectionProfile): RepetitionCheckResult {
-    return this.checkConsecutiveSentenceRepetitionOn(this.streamTokens, profile);
+    return this.checkConsecutiveSentenceRepetitionOn(this.streamTokens, profile, this.getStreamText());
   }
 
   /**
@@ -1799,9 +1896,10 @@ export class RepetitionDetectionService {
    */
   private checkConsecutiveSentenceRepetitionOn(
     tokens: string[],
-    profile: NarrativeDetectionProfile = this.PROSE_DETECTION_PROFILE
+    profile: NarrativeDetectionProfile = this.PROSE_DETECTION_PROFILE,
+    precomputedText?: string
   ): RepetitionCheckResult {
-    const text = tokens.join('');
+    const text = precomputedText ?? tokens.join('');
 
     if (text.length < profile.sentenceMinTextLength) {
       return { isRepetitive: false };
@@ -1846,7 +1944,7 @@ export class RepetitionDetectionService {
    * 主缓冲区入口，委托给参数化版本
    */
   private checkParagraphCycleRepetition(profile: NarrativeDetectionProfile): RepetitionCheckResult {
-    return this.checkParagraphCycleRepetitionOn(this.streamTokens, profile);
+    return this.checkParagraphCycleRepetitionOn(this.streamTokens, profile, this.getStreamText());
   }
 
   /**
@@ -1856,9 +1954,10 @@ export class RepetitionDetectionService {
    */
   private checkParagraphCycleRepetitionOn(
     tokens: string[],
-    profile: NarrativeDetectionProfile = this.PROSE_DETECTION_PROFILE
+    profile: NarrativeDetectionProfile = this.PROSE_DETECTION_PROFILE,
+    precomputedText?: string
   ): RepetitionCheckResult {
-    const text = this.extractNarrativeText(tokens.join(''));
+    const text = this.extractNarrativeText(precomputedText ?? tokens.join(''));
 
     // 段落块至少需要足够长的文本（3 次重复 × 至少 2 句 × 平均 30 字 ≈ 180 字符）
     if (text.length < profile.paragraphMinTextLength) {
@@ -1927,9 +2026,10 @@ export class RepetitionDetectionService {
    */
   private checkSentenceFrequencyRepetition(
     tokens: string[],
-    profile: NarrativeDetectionProfile
+    profile: NarrativeDetectionProfile,
+    precomputedText?: string
   ): RepetitionCheckResult {
-    const text = this.extractNarrativeText(tokens.join(''));
+    const text = this.extractNarrativeText(precomputedText ?? tokens.join(''));
     const sentences = this.splitIntoSentences(text);
 
     // 至少需要足够的句子才有统计意义
@@ -2329,7 +2429,7 @@ export class RepetitionDetectionService {
   private checkConsecutiveLineRepetition(
     profile: NarrativeDetectionProfile = this.PROSE_DETECTION_PROFILE
   ): RepetitionCheckResult {
-    const text = this.nonThinkStreamTokens.join('');
+    const text = this.getNonThinkText();
     const lines = this.extractMeaningfulLines(text);
 
     if (lines.length < 4) {
@@ -2437,9 +2537,13 @@ export class RepetitionDetectionService {
     return keptLines;
   }
 
-  private isInsideMarkdownCodeFence(text: string): boolean {
-    const fenceMatches = text.match(/```/g);
-    return !!fenceMatches && fenceMatches.length % 2 === 1;
+  private isInsideMarkdownCodeFence(_text: string): boolean {
+    if (this._fenceCount === -1) {
+      // trim 后重建
+      const matches = this.getNonThinkText().match(/```/g);
+      this._fenceCount = matches ? matches.length : 0;
+    }
+    return this._fenceCount % 2 === 1;
   }
 
   private isLikelyStructuralMarkdown(text: string): boolean {
@@ -2478,14 +2582,20 @@ export class RepetitionDetectionService {
    */
   resetStreamTokens(): void {
     this.streamTokens = [];
+    this._cachedStreamText = null;
     this.nonThinkStreamTokens = [];
+    this._cachedNonThinkText = null;
+    this._fenceCount = 0;
     this.thinkTokens = [];
+    this._cachedThinkText = null;
     this.contentBlocks = [];
     this.toolCallHistory = [];
     this.tagBuffer = '';
     this.lastBoundaryTokenIndex = 0;
     this.insideThink = false;
     this.lastThinkTransition = null;
+    this.totalStreamBytes = 0;
+    this.nextSizeWarningBytes = this.SIZE_WARNING_INTERVAL_BYTES;
   }
 
   /**
