@@ -200,6 +200,12 @@ export class HeaderComponent implements OnDestroy {
       if (ports && ports.length === 1 && !this.currentPort) {
         // 只有一个串口且当前没有选择串口时，设为默认
         this.currentPort = ports[0].name;
+        this.serialService.currentPortInfo = {
+          name: ports[0].name,
+          text: ports[0].text,
+          type: ports[0].type,
+          icon: ports[0].icon,
+        };
         // 使用 setTimeout 将变更检测推迟到下一个变更检测周期，避免 ExpressionChangedAfterItHasBeenCheckedError
         setTimeout(() => {
           this.cd.detectChanges();
@@ -246,6 +252,7 @@ export class HeaderComponent implements OnDestroy {
               text: probe.shortSerial || '',
               type: 'debugger',
               icon: 'fa-brands fa-usb',
+              extra: { vidPid: probe.vidPid, serial: probe.serial },
             });
           }
         }
@@ -295,6 +302,14 @@ export class HeaderComponent implements OnDestroy {
       return
     }
     this.currentPort = item.name;
+    this.serialService.currentPortInfo = {
+      name: item.name,
+      text: item.text,
+      type: item.type,
+      icon: item.icon,
+      probeSerial: item.extra?.serial || '',
+      probeVidPid: item.extra?.vidPid || '',
+    };
     this.closePortList();
   }
 

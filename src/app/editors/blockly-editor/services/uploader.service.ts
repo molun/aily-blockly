@@ -173,6 +173,7 @@ export class _UploaderService {
 
         // 提前捕获串口号，避免 build 期间设备重新插拔导致端口变化的竞态条件
         const capturedSerialPort = this.serialService.currentPort;
+        const capturedPortInfo = this.serialService.currentPortInfo;
         if (!capturedSerialPort) {
           this.uploadInProgress = false;
           this.handleUploadError('请先选择串口', '未选择串口');
@@ -258,19 +259,23 @@ export class _UploaderService {
         const boardJson = await this.projectService.getBoardJson()
         const boardModule = await this.projectService.getBoardModule();
 
-        // 获取上传参数并提取标志
-        const uploadParam = boardJson.uploadParam;
+        // 根据烧录方式选择上传参数：调试探针使用 linkUploadParam，串口使用 uploadParam
+        const isDebuggerUpload = capturedPortInfo?.type === 'debugger';
+        const uploadParam = isDebuggerUpload
+          ? (boardJson.linkUploadParam || boardJson.uploadParam)
+          : boardJson.uploadParam;
         if (!uploadParam) {
           this.uploadInProgress = false; // 重置上传状态
-          this.handleUploadError('缺少上传参数，请检查板子配置');
+          const errMsg = isDebuggerUpload ? '缺少调试探针上传参数(linkUploadParam)，请检查板子配置' : '缺少上传参数，请检查板子配置';
+          this.handleUploadError(errMsg);
           this.workflowService.finishUpload(false, 'Missing upload parameters');
-          reject({ state: 'error', text: '缺少上传参数' });
+          reject({ state: 'error', text: errMsg });
           return;
         }
 
         const { flags, cleanParam } = this.extractFlags(uploadParam);
-        const use_1200bps_touch = flags['use_1200bps_touch'];
-        const wait_for_upload = flags['wait_for_upload'];
+        const use_1200bps_touch = isDebuggerUpload ? false : flags['use_1200bps_touch'];
+        const wait_for_upload = isDebuggerUpload ? false : flags['wait_for_upload'];
 
         console.log('提取的上传标志:', flags);
         console.log('清理后的上传参数:', cleanParam);
@@ -293,6 +298,10 @@ export class _UploaderService {
           boardModule,
           appDataPath: window['path'].getAppDataPath(),
           serialPort: capturedSerialPort,
+          portType: capturedPortInfo?.type || 'serial',
+          portText: capturedPortInfo?.text || '',
+          probeSerial: capturedPortInfo?.probeSerial || '',
+          probeVidPid: capturedPortInfo?.probeVidPid || '',
           uploadParam: cleanParam, // 传递清理后的上传参数
           use_1200bps_touch,
           wait_for_upload,

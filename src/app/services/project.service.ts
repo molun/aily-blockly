@@ -1418,6 +1418,7 @@ export class ProjectService {
     if (pinConfig.data == this.currentStm32Config.board) {
       return true;
     } else if (pinConfig.extra?.build.variant == this.currentStm32Config.variant) {
+      this.currentStm32Config.board = pinConfig.data;
       return true;
     } else {
       let newPinConfig = pinConfig;
@@ -1448,11 +1449,10 @@ export class ProjectService {
       // 保存更新后的board.json
       if (isChanged) {
         await this.setBoardJson(currentBoardJson);
-        this.currentStm32Config.board = pinConfig.data;
-        this.currentStm32Config.variant = variant;
-        this.currentStm32Config.variant_h = variant_h;
-        // console.log('Updated STM32 pin config:', this.currentStm32Config);
       }
+      this.currentStm32Config.board = pinConfig.data;
+      this.currentStm32Config.variant = variant;
+      this.currentStm32Config.variant_h = variant_h;
 
       // // // 获取到的config格式为“STM32F1xx/F100C(4-6)T”
       // // // 我们需要转换为“F1XXC”
