@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer, shell, safeStorage, webFrame } = require("electron");
+const { contextBridge, ipcRenderer, shell, safeStorage, webFrame, clipboard } = require("electron");
 const { SerialPort } = require("serialport");
 const { createThrottledSerialPort, listPorts } = require("./serial");
 const { exec } = require("child_process");
@@ -679,5 +679,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     info: (message) => {
       ipcRenderer.invoke('log-info', message);
     }
+  },
+  // 系统剪贴板 API - 用于跨实例 block 复制粘贴
+  clipboard: {
+    writeText: (text) => clipboard.writeText(text),
+    readText: () => clipboard.readText(),
   }
 });

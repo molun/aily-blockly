@@ -73,6 +73,10 @@ import { ImageUploadDialogComponent } from './components/image-upload-dialog/ima
 import { HttpErrorResponse } from '@angular/common/http';
 import { ConfigService } from '../../../../services/config.service';
 import { NoticeService } from '../../../../services/notice.service';
+import { CmdService } from '../../../../services/cmd.service';
+import { ProjectService } from '../../../../services/project.service';
+import { ElectronService } from '../../../../services/electron.service';
+import { PasteInstallDialogComponent, MissingLibInfo } from '../paste-install-dialog/paste-install-dialog.component';
 import { Minimap } from '@blockly/workspace-minimap';
 import { DarkTheme } from './theme.config';
 
@@ -248,7 +252,10 @@ export class BlocklyComponent implements OnInit, OnDestroy {
     private bitmapUploadService: BitmapUploadService,
     private noticeService: NoticeService,
     private translateService: TranslateService,
-    private cdr: ChangeDetectorRef
+    private cdr: ChangeDetectorRef,
+    private cmdService: CmdService,
+    private projectService: ProjectService,
+    private electronService: ElectronService
   ) {
     // Initialize GlobalServiceManager with BitmapUploadService
     const globalServiceManager = GlobalServiceManager.getInstance();
@@ -428,6 +435,46 @@ export class BlocklyComponent implements OnInit, OnDestroy {
 
       const multiselectPlugin = new Multiselect(this.workspace);
       multiselectPlugin.init(this.options);
+
+      // 初始化跨实例复制粘贴的全局桥接
+      (window as any).__ailyClipboard = window['clipboard'] || null;
+      // 注册跨实例粘贴时缺失库的安装回调
+      (window as any).__ailyBlockPasteNeedsInstall = (missingLibs: MissingLibInfo[]) => {
+        return new Promise<void>((resolve, reject) => {
+          const modalRef = this.modal.create({
+            nzTitle: null,
+            nzFooter: null,
+            nzClosable: false,
+            nzBodyStyle: { padding: '0' },
+            nzContent: PasteInstallDialogComponent,
+            nzData: {
+              missingLibs,
+              installFn: async (libs: MissingLibInfo[]) => {
+                const projectPath = this.projectService.currentProjectPath;
+                if (!projectPath) throw new Error('No project path');
+                // Build single npm install command for all libs
+                const pkgs = libs.map(l => l.version ? `${l.name}@${l.version}` : l.name).join(' ');
+                const { code, stderr } = await this.cmdService.runAsync(
+                  `npm install ${pkgs}`, projectPath
+                );
+                if (code !== 0) throw new Error(stderr || `Exit code: ${code}`);
+                // Load each newly installed library
+                for (const lib of libs) {
+                  await this.blocklyService.loadLibrary(lib.name, projectPath);
+                }
+              },
+            },
+            nzWidth: '450px',
+          });
+          modalRef.afterClose.subscribe((result: any) => {
+            if (result?.result === 'installed') {
+              resolve();
+            } else {
+              reject(new Error('cancelled'));
+            }
+          });
+        });
+      };
 
       if (this.configData.blockly.minimap) {
         this.minimap = new Minimap(this.workspace);
