@@ -14,7 +14,7 @@
                 @for(lib of missingLibs; track lib.name) {
                 <div class="lib-item">
                     <nz-tag nzColor="processing">{{ lib.name }}</nz-tag>
-                    <span class="version">{{ lib.version }}</span>
+                    <span class="version">{{ getVersionDisplay(lib) }}</span>
                 </div>
                 }
             </div>

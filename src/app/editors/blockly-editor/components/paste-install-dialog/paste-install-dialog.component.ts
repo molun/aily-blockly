@@ -35,6 +35,14 @@ export class PasteInstallDialogComponent {
     return this.data.missingLibs;
   }
 
+  getVersionDisplay(lib: MissingLibInfo): string {
+    if (lib.localPath) {
+      const folderName = lib.localPath.split(/[/\\]/).pop() || '';
+      return 'file:' + folderName;
+    }
+    return lib.version;
+  }
+
   cancel(): void {
     if (!this.installing) {
       this.modal.close({ result: 'cancel' });
