@@ -304,8 +304,34 @@ async function main() {
                     const child = spawn(shellCmd, cmdArgs, {
                         cwd: buildPath,
                         shell: true,
-                        stdio: 'inherit'
+                        stdio: ['inherit', 'pipe', 'pipe']
                     });
+
+                    // 用于去除 ANSI 转义码
+                    const stripAnsi = (str) => str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+
+                    // 检测 probe-rs 风格的进度阶段并输出标记
+                    const detectPhase = (text) => {
+                        const clean = stripAnsi(text);
+                        const phaseMatch = clean.match(/(Erasing|Programming|Verifying)\s+.*?(\d+)%/i);
+                        if (phaseMatch) {
+                            logger.log(`[probe-rs:phase] ${phaseMatch[1]} ${phaseMatch[2]}%`);
+                        }
+                        if (/Finished\s+in\s+[\d.]+s/i.test(clean)) {
+                            logger.log('[probe-rs:phase] Finished');
+                        }
+                    };
+
+                    // 转发输出到各自的流并检测进度
+                    if (child.stdout) child.stdout.on('data', (data) => {
+                        process.stdout.write(data);
+                        detectPhase(data.toString());
+                    });
+                    if (child.stderr) child.stderr.on('data', (data) => {
+                        process.stderr.write(data);
+                        detectPhase(data.toString());
+                    });
+
                     child.on('close', (code) => resolveCmd(code));
                     child.on('error', (err) => rejectCmd(err));
                 });

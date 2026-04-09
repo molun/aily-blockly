@@ -338,6 +338,53 @@ export class _UploaderService {
         this.uploadInProgress = true;
         this.noticeService.update({ title: title, text: lastUploadText, state: 'doing', progress: 0, setTimeout: 0, stop: () => { this.cancel(); } });
 
+        // probe-rs/调试探针上传: 使用合成进度（因为 probe-rs 在非 TTY 模式下不输出进度条）
+        let hasRealProgress = false;
+        let syntheticProgressTimer: any = null;
+        if (isDebuggerUpload) {
+          const syntheticPhases = [
+            { delay: 300,  progress: 3,  text: '正在连接设备...' },
+            { delay: 800,  progress: 8,  text: '正在擦除...' },
+            { delay: 1200, progress: 15, text: '正在擦除...' },
+            { delay: 1800, progress: 20, text: '正在上传...' },
+            { delay: 2500, progress: 35, text: '正在上传...' },
+            { delay: 3500, progress: 50, text: '正在上传...' },
+            { delay: 5000, progress: 65, text: '正在上传...' },
+            { delay: 6500, progress: 78, text: '正在上传...' },
+            { delay: 8000, progress: 88, text: '验证中...' },
+            { delay: 9500, progress: 95, text: '验证中...' },
+          ];
+          const startTime = Date.now();
+          syntheticProgressTimer = setInterval(() => {
+            if (hasRealProgress || this.cancelled || this.isErrored || this.uploadCompleted) {
+              clearInterval(syntheticProgressTimer);
+              syntheticProgressTimer = null;
+              return;
+            }
+            const elapsed = Date.now() - startTime;
+            // 找到当前时间点应该显示的最新阶段
+            let currentPhase = null;
+            for (let i = syntheticPhases.length - 1; i >= 0; i--) {
+              if (elapsed >= syntheticPhases[i].delay) {
+                currentPhase = syntheticPhases[i];
+                break;
+              }
+            }
+            if (currentPhase && currentPhase.progress > lastProgress) {
+              lastProgress = currentPhase.progress;
+              lastUploadText = currentPhase.text;
+              this.safeUpdateNotice({
+                title: title,
+                text: currentPhase.text,
+                state: 'doing',
+                progress: currentPhase.progress,
+                setTimeout: 0,
+                stop: () => { this.cancel(); }
+              });
+            }
+          }, 300);
+        }
+
         let bufferData = '';
         this.cmdService.run(uploadCmd, null, false).subscribe({
           next: async (output: CmdOutput) => {
@@ -415,6 +462,12 @@ export class _UploaderService {
                       this.logService.update({ "detail": line });
                     }
 
+                    // probe-rs 进度跟踪 (Erasing/Programming/Verifying 三阶段)
+                    // 匹配直接输出格式和 upload.js 中继的 [probe-rs:phase] 标记
+                    const probeRsMatch = trimmedLine.match(/^\s*(?:\[probe-rs:phase\]\s*)?(Erasing|Programming|Verifying)\s+.*?(\d+)%/i);
+                    // probe-rs 完成标志: "Finished in X.XXs" 或 "[probe-rs:phase] Finished"
+                    const probeRsFinished = /(?:^\s*Finished\s+in\s+[\d.]+s|\[probe-rs:phase\]\s*Finished)/i.test(trimmedLine);
+
                     // ESP32特定进度跟踪
                     let isESP32Format = /Writing\s+at\s+0x[0-9a-f]+\s+\[[^\]]*\]\s+\d+\.\d+%\s+\d+\/\d+\s+bytes\.\.\./i.test(trimmedLine);
                     
@@ -448,8 +501,30 @@ export class _UploaderService {
 
                     let progressValue = 0;
 
-                    // 优先处理ESP32格式
-                    if (isESP32Format) {
+                    // 优先处理 probe-rs 格式
+                    if (probeRsMatch) {
+                      hasRealProgress = true; // 检测到真实进度数据，停止合成进度
+                      const phase = probeRsMatch[1].toLowerCase();
+                      const phaseProgress = parseInt(probeRsMatch[2], 10);
+                      // Erasing: 0-15%, Programming: 15-85%, Verifying: 85-99%
+                      if (phase === 'erasing') {
+                        progressValue = Math.floor(phaseProgress * 0.15);
+                        lastUploadText = '正在擦除...';
+                      } else if (phase === 'programming') {
+                        progressValue = 15 + Math.floor(phaseProgress * 0.70);
+                        lastUploadText = '正在上传...';
+                      } else if (phase === 'verifying') {
+                        progressValue = 85 + Math.floor(phaseProgress * 0.14);
+                        lastUploadText = '验证中...';
+                      }
+                      // 强制刷新显示（probe-rs 阶段切换时进度可能回到0再上升）
+                      lastProgress = Math.min(lastProgress, progressValue - 1);
+                    } else if (probeRsFinished) {
+                      hasRealProgress = true;
+                      progressValue = 100;
+                      lastUploadText = '上传完成';
+                      this.uploadCompleted = true;
+                    } else if (isESP32Format) {
                       const numericMatch = trimmedLine.match(/(\d+\.\d+)%/);
                       if (numericMatch) {
                         const regionProgress = parseInt(numericMatch[1], 10);
@@ -538,6 +613,11 @@ export class _UploaderService {
                       this.uploadCompleted = true;
                     }
 
+                    // probe-rs: Finished in X.XXs
+                    if (/^\s*Finished\s+in\s+[\d.]+s/i.test(trimmedLine)) {
+                      this.uploadCompleted = true;
+                    }
+
                     // 记录进程退出码
                     const exitCodeMatch = trimmedLine.match(/^exit code: (\d+)$/i);
                     if (exitCodeMatch) {
@@ -554,6 +634,7 @@ export class _UploaderService {
             }
           },
           error: (error: any) => {
+            if (syntheticProgressTimer) { clearInterval(syntheticProgressTimer); syntheticProgressTimer = null; }
             console.log("上传命令错误:", error);
             this.uploadInProgress = false; // 确保重置上传状态
             this._builderService.isUploading = false;
@@ -564,6 +645,7 @@ export class _UploaderService {
             reject({ state: 'error', text: error.message || '上传失败' });
           },
           complete: () => {
+            if (syntheticProgressTimer) { clearInterval(syntheticProgressTimer); syntheticProgressTimer = null; }
             console.log("上传命令完成，cancelled:", this.cancelled, "isErrored:", this.isErrored, "uploadCompleted:", this.uploadCompleted, "processExitCode:", this.processExitCode);
             
             // 确保 uploadInProgress 在所有情况下都被重置
