@@ -2,7 +2,7 @@ const path = require("path");
 const os = require("os");
 const fs = require("fs");
 const WinState = require('electron-win-state').default;
-const { app, BrowserWindow, ipcMain, dialog, screen, shell, net } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, screen, shell, net, Menu } = require("electron");
 
 const { isWin32, isDarwin, isLinux } = require("./platform");
 const projectLock = require("./project-lock");
@@ -341,6 +341,23 @@ function getProjectLockStringsForMain() {
   }
 }
 
+function getMenuStringForMain(key, fallback) {
+  try {
+    const loc = (app.getLocale() || "").toLowerCase();
+    const pack = loc.startsWith("zh") ? "zh_cn" : "en";
+    const fp = path.join(__dirname, `../public/i18n/${pack}/${pack}.json`);
+    if (!fs.existsSync(fp)) {
+      return fallback;
+    }
+    const j = JSON.parse(fs.readFileSync(fp, "utf8"));
+    const v = j.MENU && j.MENU[key];
+    return v || fallback;
+  } catch (e) {
+    console.warn("getMenuStringForMain:", e);
+    return fallback;
+  }
+}
+
 /**
  * 打开项目目录前获取锁；冲突时弹出主进程对话框。
  * @returns {Promise<{ proceed: boolean }>}
@@ -616,11 +633,15 @@ function macosInstallEnv(childPath) {
   function extractVersion(filename, keyword) {
     // node 格式：node-v22.21.0-darwin-arm64.7z → 22.21.0
     // aily-builder 格式：aily-builder-1.0.7.7z → 1.0.7
+    // probe-rs 格式：probe-rs-0.31.0.7z → 0.31.0
     if (keyword === "node") {
       const match = filename.match(/node-v(\d+\.\d+\.\d+)/);
       return match ? match[1] : null;
     } else if (keyword === "aily-builder") {
       const match = filename.match(/aily-builder-(\d+\.\d+\.\d+)/);
+      return match ? match[1] : null;
+    } else if (keyword === "probe-rs") {
+      const match = filename.match(/probe-rs-(\d+\.\d+\.\d+)/);
       return match ? match[1] : null;
     }
     return null;
@@ -737,6 +758,30 @@ function macosInstallEnv(childPath) {
       }
     } else {
       console.error(`未找到 ${ailyBuilderName}: ${ailyBuilderZipPath}，搜索目录: ${sourceDir}`);
+    }
+  }
+  const probeRsName = "probe-rs";
+  const probeRsPath = path.join(childPath, probeRsName);
+  if (!fs.existsSync(probeRsPath)) {
+    const sourceDir = path.join(childPath, serve ? "macos" : "");
+    const probeRsZipPath = findLatestVersionFile(sourceDir, probeRsName);
+    if (probeRsZipPath && fs.existsSync(probeRsZipPath)) {
+      if (!fs.existsSync(z7Path)) {
+        console.error(`解压 ${probeRsName} 需要 7zz，但未找到: ${z7Path}`);
+      } else {
+        try {
+          const escapeProbeRsPath = escapePath(probeRsPath);
+          const escapeProbeRsZipPath = escapePath(probeRsZipPath);
+          const escapeZ7Path = escapePath(z7Path);
+          child_process.execSync(`mkdir -p ${escapeProbeRsPath} && ${escapeZ7Path} x ${escapeProbeRsZipPath} -o${escapeProbeRsPath} -t7z -y`, { stdio: 'inherit' });
+          console.log(`安装解压 ${probeRsName}: ${probeRsZipPath}成功！`);
+          if (!serve) fs.unlinkSync(probeRsZipPath);
+        } catch (error) {
+          console.error(`安装解压 ${probeRsName}: ${probeRsZipPath}失败，错误码:`, error);
+        }
+      }
+    } else {
+      console.error(`未找到 ${probeRsName}: ${probeRsZipPath}，搜索目录: ${sourceDir}`);
     }
   }
 }
@@ -1553,8 +1598,8 @@ if (shouldUseMultiInstance()) {
   }
 }
 
-// TODO: 增加快捷任务栏任务，仅 Windows 支持（macOS/Linux 无 app.setUserTasks）
-if (process.platform === "win32" && typeof app.setUserTasks === "function") {
+// Windows 任务栏跳转列表（Jump List），仅 Windows 有效；macOS 无对应 API，多开见 Dock 菜单「新建实例」或终端 `open -n`。
+if (typeof app.setUserTasks === "function") {
   // app.setUserTasks([
   //   {
   //     program: process.execPath,
@@ -1605,6 +1650,13 @@ app.on("ready", async () => {
     initFastestServersAsync();
   } catch (error) {
     console.error("loadEnv error: ", error);
+  }
+
+  if (isDarwin && app.dock) {
+    setupDarwinDockMenu();
+  }
+  if (isWin32) {
+    setupWindowsJumpListTasks();
   }
 
   if (protocolUrl) {
@@ -1875,53 +1927,84 @@ ipcMain.handle("move-to-trash", async (event, filePath) => {
   }
 })
 
+function spawnNewAppInstance(data) {
+  const { route, queryParams } = data || {};
+  const args = ["--new-instance"];
+  if (route) {
+    args.push(`--route=${route}`);
+  }
+  if (queryParams) {
+    args.push(`--query=${encodeURIComponent(JSON.stringify(queryParams))}`);
+  }
+  const { spawn } = require("child_process");
+  const execPath = process.execPath;
+  const appPath = app.getAppPath();
+  const spawnArgs = [appPath, ...args];
+  console.log("启动新实例:", execPath, spawnArgs);
+  const child = spawn(execPath, spawnArgs, {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  return { success: true, pid: child.pid };
+}
+
+function setupDarwinDockMenu() {
+  if (!isDarwin || !app.dock) {
+    return;
+  }
+  const label = getMenuStringForMain("NEW_INSTANCE", "New Instance");
+  app.dock.setMenu(
+    Menu.buildFromTemplate([
+      {
+        label,
+        click: () => {
+          spawnNewAppInstance({});
+        },
+      },
+    ])
+  );
+}
+
+/** Windows 任务栏图标右键「跳转列表」中的用户任务，与 macOS Dock 菜单「新实例」对应 */
+function setupWindowsJumpListTasks() {
+  if (!isWin32) {
+    return;
+  }
+  try {
+    const title = getMenuStringForMain("NEW_INSTANCE", "New Instance");
+    const appPath = app.getAppPath();
+    const arg0 =
+      /[\s"]/.test(appPath) ? `"${appPath.replace(/"/g, '\\"')}"` : appPath;
+    app.setUserTasks([
+      {
+        program: process.execPath,
+        arguments: `${arg0} --new-instance`,
+        title,
+        description: title,
+        iconPath: process.execPath,
+        iconIndex: 0,
+      },
+    ]);
+  } catch (e) {
+    console.warn("setupWindowsJumpListTasks:", e);
+  }
+}
+
 // 打开新实例
 ipcMain.handle("open-new-instance", async (event, data) => {
   try {
-    const { route, queryParams } = data || {};
-
-    // 构建命令行参数
-    const args = ['--new-instance']; // 添加强制新实例标志
-
-    // 如果有路由参数，将其作为环境变量传递
-    if (route) {
-      args.push(`--route=${route}`);
-    }
-
-    // 如果有查询参数，将其序列化后传递
-    if (queryParams) {
-      args.push(`--query=${encodeURIComponent(JSON.stringify(queryParams))}`);
-    }
-
-    // 启动新实例
-    const { spawn } = require('child_process');
-    const execPath = process.execPath;
-    const appPath = app.getAppPath();
-
-    // 构建完整的启动参数
-    const spawnArgs = [appPath, ...args];
-
-    console.log('启动新实例:', execPath, spawnArgs);
-
-    const child = spawn(execPath, spawnArgs, {
-      detached: true,
-      stdio: 'ignore'
-    });
-
-    // 分离子进程，使其独立运行
-    child.unref();
-
+    const result = spawnNewAppInstance(data);
     return {
       success: true,
-      pid: child.pid,
-      message: '新实例已启动'
+      pid: result.pid,
+      message: "新实例已启动",
     };
-
   } catch (error) {
-    console.error('启动新实例失败:', error);
+    console.error("启动新实例失败:", error);
     return {
       success: false,
-      error: error.message
+      error: error.message,
     };
   }
 })
