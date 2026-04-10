@@ -258,9 +258,14 @@ export const checkMissingBlockTypes = function() {
   });
   const missing = [];
   const seenLibs = new Set();
+  const libMap = typeof window !== 'undefined' ? window.__ailyBlockTypeToLibMap : null;
   allTypes.forEach((type) => {
-    if (!Blockly.Blocks[type]) {
-      const libInfo = clipboardLibraries[type];
+    const libInfo = clipboardLibraries[type];
+    const hasBlocklyDefn = !!Blockly.Blocks[type];
+    const loadedForCurrentProject = libMap && typeof libMap.has === 'function' &&
+        libMap.has(type);
+
+    if (!hasBlocklyDefn) {
       if (libInfo && !seenLibs.has(libInfo.name)) {
         seenLibs.add(libInfo.name);
         missing.push({ blockType: type, name: libInfo.name, version: libInfo.version, localPath: libInfo.localPath || '' });
@@ -268,6 +273,12 @@ export const checkMissingBlockTypes = function() {
         // Block type is missing and no library info available
         missing.push({ blockType: type, name: '', version: '', localPath: '' });
       }
+      return;
+    }
+    // 定义仍在 Blockly.Blocks 中（例如粘贴安装后会话内残留），但当前项目未通过 loadLibrary 挂载到 blockTypeToLibMap
+    if (libInfo && !loadedForCurrentProject && !seenLibs.has(libInfo.name)) {
+      seenLibs.add(libInfo.name);
+      missing.push({ blockType: type, name: libInfo.name, version: libInfo.version, localPath: libInfo.localPath || '' });
     }
   });
   return missing;
