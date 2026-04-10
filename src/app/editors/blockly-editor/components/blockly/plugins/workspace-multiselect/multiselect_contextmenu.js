@@ -835,7 +835,8 @@ const registerSelectAll = function() {
   const id = 'workspaceSelectAll';
   const selectAllOption = {
     displayText: function() {
-      return 'Select all Blocks';
+      return Blockly.Msg['WORKSPACE_SELECT_ALL']?
+          Blockly.Msg['WORKSPACE_SELECT_ALL'] : 'Select all Blocks';
     },
     preconditionFn: function(scope) {
       return scope.workspace.getTopBlocks().some(
