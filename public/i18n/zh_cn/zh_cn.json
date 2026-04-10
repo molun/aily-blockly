@@ -67,7 +67,8 @@
         "MULTI_COMPRESS": "压缩为zip",
         "LIB_MANAGER": "库管理",
         "AI_ASSISTANT": "AI助手",
-        "PROJECT_HUB": "项目广场"
+        "PROJECT_HUB": "项目广场",
+        "NEW_INSTANCE": "新建实例"
     },
     "ESP32": {
         "UPLOAD_SPEED": "烧录速度",
@@ -135,6 +136,9 @@
         "CONTROLS_SWITCH_CASE": "情况",
         "CONTROLS_SWITCH_DO": "执行",
         "CONTROLS_SWITCH_DEFAULT": "默认执行",
+        "CROSS_TAB_PASTE": "粘贴",
+        "CROSS_TAB_PASTE_X_ELEMENTS": "粘贴 %1 项",
+        "WORKSPACE_SELECT_ALL": "全选积木",
         "ONBOARDING": {
             "TOOLBOX_TITLE": "积木工具箱",
             "TOOLBOX_DESC": "这里是积木分类区域，点击不同的分类可以找到各种功能积木块，拖拽到右边工作区使用。",
@@ -278,6 +282,12 @@
         "CURRENT_BOARD_CORE": "当前开发板内核：",
         "CANCEL": "取消",
         "CONTINUE_INSTALL": "继续安装"
+    },
+    "PASTE_INSTALL": {
+        "TITLE": "需要安装库",
+        "MESSAGE": "粘贴的积木块需要以下未安装的库，是否安装？",
+        "CANCEL": "取消",
+        "INSTALL_AND_PASTE": "安装并粘贴"
     },
     "BOARD_SELECTOR": {
         "TITLE": "切换开发板",
@@ -588,7 +598,21 @@
         "AGREEMENT_REQUIRED": "请先勾选同意用户协议和隐私政策",
         "MODAL_CLOSE": "关闭",
         "AGREEMENT_LOAD_FAILED": "加载用户协议失败",
-        "PRIVACY_LOAD_FAILED": "加载隐私政策失败"
+        "PRIVACY_LOAD_FAILED": "加载隐私政策失败",
+        "WECHAT_QRCODE_FAILED": "获取二维码失败",
+        "WECHAT_REFRESH": "刷新二维码",
+        "WECHAT_RETRY": "重试",
+        "INVITE_CODE_PLACEHOLDER": "邀请码(选填)",
+        "AGREEMENT_BY_LOGIN": "登录/注册即表示同意",
+        "TERMS_OF_USE": "使用条款",
+        "OTHER_LOGIN_METHODS": "您还可以使用以下账号登录",
+        "GITHUB_CONTINUE": "请在Github授权页面点击\"Continue\"完成登录",
+        "REGISTER": "注册",
+        "WECHAT_BIND_REQUIRED": "需要绑定微信",
+        "WECHAT_BIND_SCAN": "请使用微信扫码绑定",
+        "WECHAT_BIND_SUCCESS": "绑定成功",
+        "WECHAT_BIND_CONFLICT": "该微信已绑定其他账号",
+        "BACK_TO_LOGIN": "返回登录"
     },
     "COMMON": {
         "FEATURE_COMING_SOON": "功能即将上线",
