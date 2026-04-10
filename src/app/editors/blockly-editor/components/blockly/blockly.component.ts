@@ -73,6 +73,11 @@ import { ImageUploadDialogComponent } from './components/image-upload-dialog/ima
 import { HttpErrorResponse } from '@angular/common/http';
 import { ConfigService } from '../../../../services/config.service';
 import { NoticeService } from '../../../../services/notice.service';
+import { CmdService } from '../../../../services/cmd.service';
+import { ProjectService } from '../../../../services/project.service';
+import { ElectronService } from '../../../../services/electron.service';
+import { CrossPlatformCmdService } from '../../../../services/cross-platform-cmd.service';
+import { PasteInstallDialogComponent, MissingLibInfo } from '../paste-install-dialog/paste-install-dialog.component';
 import { Minimap } from '@blockly/workspace-minimap';
 import { DarkTheme } from './theme.config';
 
@@ -248,7 +253,11 @@ export class BlocklyComponent implements OnInit, OnDestroy {
     private bitmapUploadService: BitmapUploadService,
     private noticeService: NoticeService,
     private translateService: TranslateService,
-    private cdr: ChangeDetectorRef
+    private cdr: ChangeDetectorRef,
+    private cmdService: CmdService,
+    private projectService: ProjectService,
+    private electronService: ElectronService,
+    private crossPlatformCmdService: CrossPlatformCmdService
   ) {
     // Initialize GlobalServiceManager with BitmapUploadService
     const globalServiceManager = GlobalServiceManager.getInstance();
@@ -428,6 +437,73 @@ export class BlocklyComponent implements OnInit, OnDestroy {
 
       const multiselectPlugin = new Multiselect(this.workspace);
       multiselectPlugin.init(this.options);
+
+      // 初始化跨实例复制粘贴的全局桥接
+      (window as any).__ailyClipboard = window['clipboard'] || null;
+      // 注册跨实例粘贴时缺失库的安装回调
+      (window as any).__ailyBlockPasteNeedsInstall = (missingLibs: MissingLibInfo[]) => {
+        // Filter to only installable libs (those with a name)
+        const installableLibs = missingLibs.filter(l => l.name);
+        if (installableLibs.length === 0) {
+          // No installable libs info available, still resolve to attempt paste
+          return Promise.resolve();
+        }
+        return new Promise<void>((resolve, reject) => {
+          const modalRef = this.modal.create({
+            nzTitle: null,
+            nzFooter: null,
+            nzClosable: false,
+            nzBodyStyle: { padding: '0' },
+            nzContent: PasteInstallDialogComponent,
+            nzData: {
+              missingLibs: installableLibs,
+              installFn: async (libs: MissingLibInfo[]) => {
+                const projectPath = this.projectService.currentProjectPath;
+                if (!projectPath) throw new Error('No project path');
+                // Separate local libs from npm libs
+                const localLibs = libs.filter(l => l.localPath);
+                const npmLibs = libs.filter(l => !l.localPath);
+                // Handle local libs: copy source folder to current project then npm install from local path
+                for (const lib of localLibs) {
+                  // Extract the folder name from localPath (e.g. "lib-l298n" from "C:\...\lib-l298n")
+                  const folderName = lib.localPath!.split(/[/\\]/).pop()!;
+                  const destPath = this.electronService.pathJoin(projectPath, folderName);
+                  if (lib.localPath !== destPath) {
+                    if (this.electronService.exists(destPath)) {
+                      await this.crossPlatformCmdService.removeItem(destPath, true, true);
+                    }
+                    await this.crossPlatformCmdService.copyItem(lib.localPath!, destPath, true, true);
+                  }
+                  const { code, stderr } = await this.cmdService.runAsync(
+                    `npm install "${destPath}"`, projectPath
+                  );
+                  if (code !== 0) throw new Error(stderr || `Exit code: ${code}`);
+                }
+                // Handle npm libs: batch npm install
+                if (npmLibs.length > 0) {
+                  const pkgs = npmLibs.map(l => l.version ? `${l.name}@${l.version}` : l.name).join(' ');
+                  const { code, stderr } = await this.cmdService.runAsync(
+                    `npm install ${pkgs}`, projectPath
+                  );
+                  if (code !== 0) throw new Error(stderr || `Exit code: ${code}`);
+                }
+                // Load each newly installed library
+                for (const lib of libs) {
+                  await this.blocklyService.loadLibrary(lib.name, projectPath);
+                }
+              },
+            },
+            nzWidth: '450px',
+          });
+          modalRef.afterClose.subscribe((result: any) => {
+            if (result?.result === 'installed') {
+              resolve();
+            } else {
+              reject(new Error('cancelled'));
+            }
+          });
+        });
+      };
 
       if (this.configData.blockly.minimap) {
         this.minimap = new Minimap(this.workspace);

@@ -113,7 +113,35 @@ export const getByID = function(workspace, id) {
 };
 
 /**
- * Store copy information for blocks in localStorage.
+ * Recursively collect all block types from a blockState object.
+ * @param {Object} blockState The block state object.
+ * @param {Set<string>} types Set to collect types into.
+ */
+const collectBlockTypes = function(blockState, types) {
+  if (!blockState) return;
+  if (blockState.type) types.add(blockState.type);
+  // Traverse inputs (object keys with block and shadow values)
+  if (blockState.inputs) {
+    for (const key of Object.keys(blockState.inputs)) {
+      const input = blockState.inputs[key];
+      if (input && input.block) collectBlockTypes(input.block, types);
+      if (input && input.shadow) collectBlockTypes(input.shadow, types);
+    }
+  }
+  // Traverse next connection
+  if (blockState.next && blockState.next.block) {
+    collectBlockTypes(blockState.next.block, types);
+  }
+};
+
+/**
+ * Metadata about libraries from the last clipboard read.
+ * Used by paste callback to determine which libraries need to be installed.
+ */
+export let clipboardLibraries = {};
+
+/**
+ * Store copy information for blocks in localStorage and system clipboard.
  */
 export const dataCopyToStorage = function() {
   const storage = [];
@@ -126,12 +154,71 @@ export const dataCopyToStorage = function() {
   localStorage.setItem('blocklyStashConnection',
       JSON.stringify(connectionDBList));
   localStorage.setItem('blocklyStashTime', timestamp);
+
+  // Write enriched data to system clipboard for cross-instance paste
+  try {
+    const ailyClipboard = window.__ailyClipboard;
+    if (ailyClipboard) {
+      // Collect all block types and their library info
+      const allTypes = new Set();
+      storage.forEach((data) => {
+        const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+        if (parsed.blockState) collectBlockTypes(parsed.blockState, allTypes);
+      });
+      const libMap = window.__ailyBlockTypeToLibMap;
+      const libraries = {};
+      if (libMap) {
+        allTypes.forEach((type) => {
+          const info = libMap.get(type);
+          if (info) libraries[type] = { name: info.name, version: info.version, localPath: info.localPath || '' };
+        });
+      }
+      const enriched = {
+        format: 'aily-blockly-clipboard',
+        version: 1,
+        blocks: storage,
+        connections: connectionDBList.slice(),
+        libraries,
+        timestamp,
+      };
+      ailyClipboard.writeText(JSON.stringify(enriched));
+    }
+  } catch (e) {
+    console.warn('[multiselect] Failed to write to system clipboard:', e);
+  }
 };
 
 /**
- * Get copy information for blocks from localStorage.
+ * Get copy information for blocks from system clipboard or localStorage.
  */
 export const dataCopyFromStorage = function() {
+  // Try system clipboard first (cross-instance)
+  try {
+    const ailyClipboard = window.__ailyClipboard;
+    if (ailyClipboard) {
+      const text = ailyClipboard.readText();
+      if (text) {
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.format === 'aily-blockly-clipboard' && parsed.timestamp > timestamp) {
+          timestamp = parsed.timestamp;
+          copyData.clear();
+          (parsed.blocks || []).forEach((data) => {
+            copyData.add(data);
+          });
+          connectionDBList.length = 0;
+          (parsed.connections || []).forEach((data) => {
+            connectionDBList.push(data);
+          });
+          clipboardLibraries = parsed.libraries || {};
+          return;
+        }
+      }
+    }
+  } catch (e) {
+    // Not aily-blockly data or parse error, fall through to localStorage
+  }
+
+  // Fallback: localStorage (same-instance cross-tab)
   const storage = JSON.parse(localStorage.getItem('blocklyStashMulti'));
   const connection = JSON.parse(localStorage.getItem('blocklyStashConnection'));
   const time = localStorage.getItem('blocklyStashTime');
@@ -145,11 +232,41 @@ export const dataCopyFromStorage = function() {
     connection.forEach((data) => {
       connectionDBList.push(data);
     });
+    clipboardLibraries = {};
   }
 };
 
 /**
- * Get blocks number in the clipboard from localStorage.
+ * Check for missing block types in the current clipboard data.
+ * Returns an array of { blockType, name, version, localPath } for blocks whose
+ * definitions are not registered yet and have library info in clipboard.
+ * Also returns entries without library info (name='') so paste is blocked.
+ */
+export const checkMissingBlockTypes = function() {
+  const allTypes = new Set();
+  copyData.forEach((data) => {
+    const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+    if (parsed.blockState) collectBlockTypes(parsed.blockState, allTypes);
+  });
+  const missing = [];
+  const seenLibs = new Set();
+  allTypes.forEach((type) => {
+    if (!Blockly.Blocks[type]) {
+      const libInfo = clipboardLibraries[type];
+      if (libInfo && !seenLibs.has(libInfo.name)) {
+        seenLibs.add(libInfo.name);
+        missing.push({ blockType: type, name: libInfo.name, version: libInfo.version, localPath: libInfo.localPath || '' });
+      } else if (!libInfo) {
+        // Block type is missing and no library info available
+        missing.push({ blockType: type, name: '', version: '', localPath: '' });
+      }
+    }
+  });
+  return missing;
+};
+
+/**
+ * Get blocks number in the clipboard from system clipboard or localStorage.
  * @param {boolean} useCopyPasteCrossTab Whether or not to use
  *     cross tab copy/paste.
  * @returns {number} The number of blocks in the clipboard.
@@ -158,12 +275,117 @@ export const blockNumGetFromStorage = function(useCopyPasteCrossTab) {
   if (!useCopyPasteCrossTab) {
     return copyData.size;
   }
+  // Try system clipboard first
+  try {
+    const ailyClipboard = window.__ailyClipboard;
+    if (ailyClipboard) {
+      const text = ailyClipboard.readText();
+      if (text) {
+        const parsed = JSON.parse(text);
+        if (parsed && parsed.format === 'aily-blockly-clipboard' && parsed.timestamp > timestamp) {
+          return (parsed.blocks || []).length;
+        }
+      }
+    }
+  } catch (e) {
+    // fall through
+  }
+  // Fallback: localStorage
   const storage = JSON.parse(localStorage.getItem('blocklyStashMulti'));
   const time = localStorage.getItem('blocklyStashTime');
   if (storage && parseInt(time) > timestamp) {
     return storage.length;
   }
   return copyData.size;
+};
+
+/**
+ * Last right-click position in client coordinates (for context menu paste).
+ */
+export let lastContextMenuClientPosition = { x: 0, y: 0 };
+
+// Capture right-click position for context menu paste positioning
+document.addEventListener('contextmenu', function(e) {
+  lastContextMenuClientPosition = { x: e.clientX, y: e.clientY };
+});
+
+/**
+ * Collect all top-level blocks and bounding box from a list of pasted blocks.
+ * @param {Array<Blockly.BlockSvg>} blockList The pasted blocks.
+ * @returns {{topBlocks: Set, minX: number, minY: number, maxX: number, maxY: number}}
+ */
+const collectPastedBlockInfo = function(blockList) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const topBlocks = new Set();
+  blockList.forEach(function(block) {
+    if (!block || typeof block.getBoundingRectangle !== 'function') return;
+    const rect = block.getBoundingRectangle();
+    if (rect.left < minX) minX = rect.left;
+    if (rect.top < minY) minY = rect.top;
+    if (rect.right > maxX) maxX = rect.right;
+    if (rect.bottom > maxY) maxY = rect.bottom;
+    // Track top-level blocks (no parent) for moving
+    let b = block;
+    while (b.getParent()) b = b.getParent();
+    topBlocks.add(b);
+  });
+  return { topBlocks, minX, minY, maxX, maxY };
+};
+
+/**
+ * Move pasted blocks so the bounding box top-left aligns with the
+ * last right-click (context menu) position in workspace coordinates.
+ * @param {Array<Blockly.BlockSvg>} blockList The pasted blocks.
+ * @param {Blockly.WorkspaceSvg} workspace The target workspace.
+ */
+export const moveBlocksToMousePosition = function(blockList, workspace) {
+  if (!blockList || blockList.length === 0) return;
+  try {
+    // Convert client coordinates to workspace coordinates via SVG CTM
+    const matrix = workspace.getCanvas().getScreenCTM().inverse();
+    const wsPoint = new DOMPoint(
+        lastContextMenuClientPosition.x,
+        lastContextMenuClientPosition.y).matrixTransform(matrix);
+
+    const info = collectPastedBlockInfo(blockList);
+    if (!isFinite(info.minX)) return;
+
+    // Move so top-left of bounding box aligns with mouse position
+    const dx = wsPoint.x - info.minX;
+    const dy = wsPoint.y - info.minY;
+    info.topBlocks.forEach(function(block) {
+      block.moveBy(dx, dy);
+    });
+  } catch (e) {
+    // Fallback to center if coordinate conversion fails
+    centerBlocksInViewport(blockList, workspace);
+  }
+};
+
+/**
+ * Move a list of pasted blocks so their center aligns with the viewport center.
+ * @param {Array<Blockly.BlockSvg>} blockList The pasted blocks.
+ * @param {Blockly.WorkspaceSvg} workspace The target workspace.
+ */
+export const centerBlocksInViewport = function(blockList, workspace) {
+  if (!blockList || blockList.length === 0) return;
+  const info = collectPastedBlockInfo(blockList);
+  if (!isFinite(info.minX)) return;
+  // Get viewport center in workspace coordinates
+  const metrics = workspace.getMetrics();
+  const scale = workspace.scale || 1;
+  const viewCenterX = metrics.viewLeft + metrics.viewWidth / 2;
+  const viewCenterY = metrics.viewTop + metrics.viewHeight / 2;
+  // Center of pasted blocks
+  const blocksCenterX = (info.minX + info.maxX) / 2;
+  const blocksCenterY = (info.minY + info.maxY) / 2;
+  // Offset to move
+  const dx = viewCenterX / scale - blocksCenterX;
+  const dy = viewCenterY / scale - blocksCenterY;
+  // Move only top-level blocks (children move with parent)
+  info.topBlocks.forEach(function(block) {
+    block.moveBy(dx, dy);
+  });
 };
 
 /**

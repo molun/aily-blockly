@@ -279,6 +279,12 @@
         "CANCEL": "取消",
         "CONTINUE_INSTALL": "继续安装"
     },
+    "PASTE_INSTALL": {
+        "TITLE": "需要安装库",
+        "MESSAGE": "粘贴的积木块需要以下未安装的库，是否安装？",
+        "CANCEL": "取消",
+        "INSTALL_AND_PASTE": "安装并粘贴"
+    },
     "BOARD_SELECTOR": {
         "TITLE": "切换开发板",
         "SEARCH_PLACEHOLDER": "搜索开发板...",
