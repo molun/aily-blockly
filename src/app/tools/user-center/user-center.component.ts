@@ -118,6 +118,7 @@ export class UserCenterComponent {
   }
 
   refreshBenefits() {
+    if (!this.authService.isLoggedIn) return;
     this.authService.getBenefits()
       .pipe(takeUntil(this.destroy$))
       .subscribe({
