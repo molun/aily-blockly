@@ -56,6 +56,8 @@ export class UserCenterComponent {
   nicknameError = '';
   quotaUsagePercent = 0;
 
+  benefits: any = null;
+
   constructor(
     private uiService: UiService
   ) {
@@ -72,6 +74,7 @@ export class UserCenterComponent {
       .subscribe(isLoggedIn => {
         if (isLoggedIn) {
           this.refreshMe();
+          this.refreshBenefits();
         }
       });
 
@@ -111,6 +114,22 @@ export class UserCenterComponent {
 
   ngAfterViewInit(): void {
     this.refreshMe();
+    this.refreshBenefits();
+  }
+
+  refreshBenefits() {
+    this.authService.getBenefits()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (res) => {
+          if (res.status === 200 && res.data) {
+            this.benefits = res.data;
+          }
+        },
+        error: (err) => {
+          console.warn('获取权益信息失败:', err);
+        }
+      });
   }
 
   ngOnDestroy() {

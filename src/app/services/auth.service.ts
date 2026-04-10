@@ -275,6 +275,13 @@ export class AuthService {
   }
 
   /**
+   * 获取用户权益摘要（仪表盘用，无缓存）
+   */
+  getBenefits(): Observable<CommonResponse> {
+    return this.http.get<CommonResponse>(API.benefits);
+  }
+
+  /**
    * 更改用户昵称
    */
   async changeNickname(newNickname: string) {
