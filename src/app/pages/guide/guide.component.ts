@@ -12,6 +12,7 @@ import { HttpClient } from '@angular/common/http';
 import { CommonModule } from '@angular/common';
 import { OnboardingService } from '../../services/onboarding.service';
 import { GUIDE_ONBOARDING_CONFIG } from '../../configs/onboarding.config';
+import { ThemeService } from '../../services/theme.service';
 
 @Component({
   selector: 'app-guide',
@@ -23,6 +24,17 @@ export class GuideComponent implements OnInit, AfterViewInit {
   version = version;
   guideMenu = GUIDE_MENU;
   showMenu = true;
+
+  get logoSrc(): string {
+    return this.themeService.theme() === 'light' ? 'imgs/logo-light.webp' : 'imgs/logo.webp';
+  }
+
+  getSponsorImg(sponsor: any): string {
+    if (this.themeService.theme() === 'light' && sponsor.imgLight) {
+      return 'sponsor/' + sponsor.imgLight;
+    }
+    return 'sponsor/' + sponsor.img;
+  }
   showMore = false;
   sponsors: any[] = [];
   showImgUrl: string | null = null;
@@ -73,7 +85,8 @@ export class GuideComponent implements OnInit, AfterViewInit {
     private electronService: ElectronService,
     private http: HttpClient,
     private configService: ConfigService,
-    private onboardingService: OnboardingService
+    private onboardingService: OnboardingService,
+    private themeService: ThemeService
   ) { }
 
   /**
