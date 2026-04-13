@@ -676,6 +676,53 @@ export class LoginComponent implements OnDestroy {
                 console.error('处理微信绑定登录成功数据失败:', err);
                 this.message.error(this.translate.instant('LOGIN.LOGIN_FAILED') || '登录失败');
               });
+            } else if (data.status === 'needs_merge_confirm') {
+              // 暂停轮询，等待用户确认合并
+              this.stopLoginBindCheck();
+              const mergeInfo = (data as any).merge_info;
+              const ticket = this.loginBindQrTicket!;
+              this.modal.confirm({
+                nzClassName: 'merge-confirm-modal',
+                nzTitle: '发现已有账号',
+                nzContent: `检测到微信账号「${mergeInfo?.wechat_nickname || '未知'}」与邮箱账号「${mergeInfo?.email || '未知'}」可以合并。合并后微信将绑定到邮箱账号，原微信账号将被停用。是否确认合并？`,
+                nzOkText: '确认合并',
+                nzCancelText: '取消',
+                nzOnOk: () => {
+                  this.authService.confirmWechatMerge(ticket, 'login_bind').subscribe({
+                    next: (mergeResponse) => {
+                      if (mergeResponse.status === 200 && mergeResponse.data && 'access_token' in mergeResponse.data) {
+                        this.loginBindStatus = 'confirmed';
+                        this.cleanupLoginBind();
+                        this.authService.handleWeChatOAuthSuccess({
+                          access_token: mergeResponse.data.access_token,
+                          refresh_token: mergeResponse.data.refresh_token,
+                          user: mergeResponse.data.user,
+                        }).then(() => {
+                          this.message.success(this.translate.instant('LOGIN.LOGIN_SUCCESS') || '登录成功');
+                          this.loginBindMode = false;
+                          this.cdr.detectChanges();
+                        }).catch(() => {
+                          this.message.error(this.translate.instant('LOGIN.LOGIN_FAILED') || '登录失败');
+                        });
+                      } else {
+                        this.message.error('合并失败，请重试');
+                        // 恢复轮询以便用户重试
+                        this.startWeChatLoginBindCheck();
+                      }
+                    },
+                    error: (err) => {
+                      const msg = err?.error?.messages || err?.error?.message || '合并失败，请重试';
+                      this.message.error(msg);
+                      this.startWeChatLoginBindCheck();
+                    },
+                  });
+                },
+                nzOnCancel: () => {
+                  // 用户取消，继续轮询（后端 Redis 中状态依旧，或用户可重新扫码）
+                  this.startWeChatLoginBindCheck();
+                },
+              });
+              this.cdr.detectChanges();
             } else if (data.status === 'error') {
               this.loginBindStatus = 'error';
               this.loginBindStatusMessage = data.message || '绑定失败';
@@ -794,6 +841,7 @@ export class LoginComponent implements OnDestroy {
             this.cdr.detectChanges();
             const mergeInfo = (response.data as any).merge_info;
             this.modal.confirm({
+              nzClassName: 'merge-confirm-modal',
               nzTitle: '发现已有账号',
               nzContent: `检测到微信账号「${mergeInfo?.wechat_nickname || '未知'}」与邮箱账号「${mergeInfo?.email || '未知'}」可以合并。合并后微信将绑定到邮箱账号，原微信账号将被停用。是否确认合并？`,
               nzOkText: '确认合并',

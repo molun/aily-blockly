@@ -1004,10 +1004,10 @@ export class AuthService {
   // ==================== 微信登录 Mock ====================
   private wechatMockCallCount = new Map<string, number>();
 
-  private getWechatMockScenario(): 'confirmed' | 'needs_email_bind' | null {
+  private getWechatMockScenario(): 'confirmed' | 'needs_email_bind' | 'email_merge_confirm' | 'login_bind_merge_confirm' | null {
     const scenario = sessionStorage.getItem('wechat_login_mock_scenario');
-    if (scenario === 'confirmed' || scenario === 'needs_email_bind') {
-      return scenario;
+    if (scenario === 'confirmed' || scenario === 'needs_email_bind' || scenario === 'email_merge_confirm' || scenario === 'login_bind_merge_confirm') {
+      return scenario as any;
     }
     return null;
   }
@@ -1054,7 +1054,7 @@ export class AuthService {
         data = { status: 'pending', message: '等待扫码' };
       } else if (count < 4) {
         data = { status: 'scanned', message: '已扫码，请在手机上确认' };
-      } else if (mock === 'needs_email_bind') {
+      } else if (mock === 'needs_email_bind' || mock === 'email_merge_confirm') {
         data = { status: 'needs_email_bind', message: '当前微信需要补全邮箱后继续登录。' };
         this.wechatMockCallCount.delete(ticket);
       } else {
@@ -1109,9 +1109,27 @@ export class AuthService {
    * 获取登录绑定微信的二维码
    */
   getWeChatLoginBindQrcode(pendingTicket: string): Observable<CommonResponse & { data: { ticket: string; qrcode_url: string; expires_in: number } }> {
+    if (this.getWechatMockScenario() === 'login_bind_merge_confirm') {
+      const ticket = `mock_ticket_lb_${Date.now()}`;
+      this.wechatMockCallCount.set(ticket, 0);
+      return new Observable(observer => {
+        setTimeout(() => {
+          observer.next({
+            status: 200,
+            message: 'mock',
+            data: {
+              ticket,
+              qrcode_url: `https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent('mock-lb:' + ticket)}`,
+              expires_in: 300,
+            },
+          } as any);
+          observer.complete();
+        }, 400);
+      });
+    }
     return this.http.get<CommonResponse & { data: { ticket: string; qrcode_url: string; expires_in: number } }>(
       API.wechatLoginBindQrcode,
-      { params: { pending_ticket: pendingTicket } }
+      { params: { pending_ticket: pendingTicket }, headers: { 'X-Supports-Merge-Confirm': 'true' } }
     ).pipe(
       catchError(this.handleError)
     );
@@ -1120,10 +1138,40 @@ export class AuthService {
   /**
    * 检查登录绑定微信的状态
    */
-  checkWeChatLoginBindStatus(ticket: string): Observable<CommonResponse & { data: { status: string; access_token?: string; refresh_token?: string; token_type?: string; is_new_user?: boolean; user?: any; message?: string } }> {
+  checkWeChatLoginBindStatus(ticket: string): Observable<CommonResponse & { data: { status: string; access_token?: string; refresh_token?: string; token_type?: string; is_new_user?: boolean; user?: any; message?: string; merge_info?: any } }> {
+    if (this.getWechatMockScenario() === 'login_bind_merge_confirm' && ticket.startsWith('mock_ticket_lb_')) {
+      const count = this.wechatMockCallCount.get(ticket) || 0;
+      this.wechatMockCallCount.set(ticket, count + 1);
+
+      let data: any;
+      if (count < 2) {
+        data = { status: 'pending', message: '等待扫码' };
+      } else if (count < 4) {
+        data = { status: 'scanned', message: '已扫码，正在处理...' };
+      } else {
+        data = {
+          status: 'needs_merge_confirm',
+          message: '该微信已关联其他账号，是否将微信合并到当前邮箱账号？',
+          merge_info: {
+            wechat_user_id: 'mock_wechat_user_id',
+            wechat_nickname: 'Mock微信用户',
+            email_user_id: 'mock_email_user_id',
+            email: 'existing@example.com',
+            provider_id: 'mock_provider_id',
+          },
+        };
+        this.wechatMockCallCount.delete(ticket);
+      }
+      return new Observable(observer => {
+        setTimeout(() => {
+          observer.next({ status: 200, message: 'mock', data } as any);
+          observer.complete();
+        }, 300);
+      });
+    }
     return this.http.get<CommonResponse & { data: { status: string; access_token?: string; refresh_token?: string; token_type?: string; is_new_user?: boolean; user?: any; message?: string } }>(
       API.wechatLoginBindCheck,
-      { params: { ticket } }
+      { params: { ticket }, headers: { 'X-Supports-Merge-Confirm': 'true' } }
     ).pipe(
       catchError(this.handleError)
     );
@@ -1133,8 +1181,31 @@ export class AuthService {
    * 微信登录后补全邮箱绑定
    */
   completeWechatEmailBindLogin(ticket: string, email: string, code: string, invite_code?: string, confirm_merge?: boolean): Observable<CommonResponse & { data: { access_token: string; refresh_token?: string; token_type?: string; is_new_user?: boolean; user?: any } }> {
+    const mock = this.getWechatMockScenario();
     // Mock 模式
-    if (this.getWechatMockScenario() && ticket.startsWith('mock_ticket_')) {
+    if (mock && ticket.startsWith('mock_ticket_')) {
+      // email_merge_confirm 场景：首次返回 needs_merge_confirm，confirm 后返回成功
+      if (mock === 'email_merge_confirm' && !confirm_merge) {
+        return new Observable(observer => {
+          setTimeout(() => {
+            observer.next({
+              status: 200,
+              message: 'mock',
+              data: {
+                status: 'needs_merge_confirm',
+                merge_info: {
+                  wechat_user_id: 'mock_wechat_user_id',
+                  wechat_nickname: 'Mock微信用户',
+                  email_user_id: 'mock_email_user_id',
+                  email: email || 'existing@example.com',
+                  provider_id: 'mock_provider_id',
+                },
+              },
+            } as any);
+            observer.complete();
+          }, 300);
+        });
+      }
       return new Observable(observer => {
         setTimeout(() => {
           observer.next({
@@ -1162,7 +1233,8 @@ export class AuthService {
     }
     return this.http.post<CommonResponse & { data: { access_token: string; refresh_token?: string; token_type?: string; is_new_user?: boolean; user?: any } }>(
       API.wechatCompleteEmailBind,
-      body
+      body,
+      { headers: { 'X-Supports-Merge-Confirm': 'true' } }
     ).pipe(
       catchError(this.handleError)
     );
@@ -1172,6 +1244,24 @@ export class AuthService {
    * 确认微信账号合并
    */
   confirmWechatMerge(ticket: string, flow: 'login_bind' | 'bind'): Observable<CommonResponse & { data: any }> {
+    if (this.getWechatMockScenario() && ticket.startsWith('mock_ticket_')) {
+      return new Observable(observer => {
+        setTimeout(() => {
+          observer.next({
+            status: 200,
+            message: 'mock',
+            data: {
+              access_token: `mock_access_merged_${Date.now()}`,
+              refresh_token: `mock_refresh_merged_${Date.now()}`,
+              token_type: 'bearer',
+              is_new_user: false,
+              user: { id: 'mock_merged_user', email: 'existing@example.com', nickname: 'Mock合并用户', groups: ['basic'] },
+            },
+          } as any);
+          observer.complete();
+        }, 500);
+      });
+    }
     return this.http.post<CommonResponse & { data: any }>(
       API.wechatConfirmMerge,
       { ticket, flow }
