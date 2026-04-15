@@ -496,12 +496,22 @@ export class LoginComponent implements OnDestroy {
       this.countdown--;
       this.cdr.detectChanges();
       if (this.countdown <= 0) {
-        clearInterval(this.countdownTimer);
-        this.isSendingCode = false;
-        this.countdownTimer = null;
+        this.clearCountdown();
         this.cdr.detectChanges();
       }
     }, 1000);
+  }
+
+  /**
+   * 清除倒计时
+   */
+  private clearCountdown() {
+    if (this.countdownTimer) {
+      clearInterval(this.countdownTimer);
+      this.countdownTimer = null;
+    }
+    this.countdown = 0;
+    this.isSendingCode = false;
   }
 
   /**
@@ -537,6 +547,7 @@ export class LoginComponent implements OnDestroy {
               this.cdr.detectChanges();
               return;
             }
+            this.clearCountdown();
             this.message.success(this.translate.instant('LOGIN.LOGIN_SUCCESS'));
           } else {
             this.message.error(
@@ -567,9 +578,7 @@ export class LoginComponent implements OnDestroy {
     this.cleanupWeChatLogin();
     this.cleanupLoginBind();
     this.cleanupEmailBind();
-    if (this.countdownTimer) {
-      clearInterval(this.countdownTimer);
-    }
+    this.clearCountdown();
   }
 
   // ==================== 登录时绑定微信 ====================
