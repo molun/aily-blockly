@@ -550,6 +550,10 @@ export class LoginComponent implements OnDestroy {
               return;
             }
             this.clearCountdown();
+            this.inputEmail = '';
+            this.inputCode = '';
+            this.inviteCode = '';
+            this.codeSent = false;
             this.message.success(this.translate.instant('LOGIN.LOGIN_SUCCESS'));
           } else {
             this.message.error(
