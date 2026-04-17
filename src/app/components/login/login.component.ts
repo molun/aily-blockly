@@ -90,6 +90,7 @@ export class LoginComponent implements OnDestroy {
   inputCode = '';
   inviteCode = '';
   isSendingCode = false;
+  codeSent = false;
   countdown = 0;
   private countdownTimer: any = null;
 
@@ -464,6 +465,7 @@ export class LoginComponent implements OnDestroy {
         next: (response) => {
           if (response.status === 200) {
             this.isSendingCode = true;
+            this.codeSent = true;
             this.cdr.detectChanges();
             this.message.success(this.translate.instant('LOGIN.CODE_SENT'));
             this.startCountdown();
@@ -528,7 +530,7 @@ export class LoginComponent implements OnDestroy {
       return;
     }
 
-    if (!this.isSendingCode) {
+    if (!this.codeSent) {
       this.message.warning(this.translate.instant('LOGIN.CODE_SENDING'));
       return;
     }
