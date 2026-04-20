@@ -274,8 +274,11 @@ export class _UploaderService {
         }
 
         const { flags, cleanParam } = this.extractFlags(uploadParam);
-        const use_1200bps_touch = isDebuggerUpload ? false : flags['use_1200bps_touch'];
-        const wait_for_upload = isDebuggerUpload ? false : flags['wait_for_upload'];
+        const use_1200bps_touch = isDebuggerUpload ? false : !!flags['use_1200bps_touch'];
+        // 兼容两种写法(--wait_for_upload_port和--wait_for_upload)，优先使用标准名
+        const wait_for_upload = isDebuggerUpload
+          ? false
+          : !!(flags['wait_for_upload_port'] || flags['wait_for_upload']);
 
         console.log('提取的上传标志:', flags);
         console.log('清理后的上传参数:', cleanParam);
