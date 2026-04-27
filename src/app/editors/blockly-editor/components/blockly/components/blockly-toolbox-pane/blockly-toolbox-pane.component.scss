@@ -168,6 +168,7 @@
 
 .toolbox-item__icon {
   width: 40px;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -176,6 +177,7 @@
 
 .toolbox-item__label {
   min-width: 0;
+  // flex-shrink: 0;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
