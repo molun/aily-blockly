@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Input, Output, ViewChild, OnDestroy, OnInit, ChangeDetectorRef, effect } from '@angular/core';
+import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, EventEmitter, Input, OnDestroy, OnInit, Output, ViewChild, effect } from '@angular/core';
 import * as Blockly from 'blockly';
 import { Subject, combineLatest } from 'rxjs';
 import { debounceTime, takeUntil, map, distinctUntilChanged, pairwise, startWith } from 'rxjs/operators';
@@ -201,13 +201,19 @@ class OverlayFlyoutMetricsManager extends (Blockly as any).MetricsManager {
   templateUrl: './blockly.component.html',
   styleUrl: './blockly.component.scss',
 })
-export class BlocklyComponent implements OnInit, OnDestroy {
+export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
   @ViewChild(BlocklyWorkspacePagesComponent, { static: true }) workspacePaneComponent!: BlocklyWorkspacePagesComponent;
+  @ViewChild('layoutElement', { static: true }) private layoutElementRef!: ElementRef<HTMLDivElement>;
+  @ViewChild('toolboxPane', { static: true }) private toolboxPaneRef!: ElementRef<HTMLDivElement>;
   @Output() libraryManagerRequested = new EventEmitter<void>();
 
   readonly toolboxMinWidth = 160;
   readonly toolboxMaxWidth = 420;
   toolboxWidth = 220;
+  private pendingToolboxWidth = this.toolboxWidth;
+  private toolboxResizeAnimationFrame: number | null = null;
+  private workspaceResizeAnimationFrame: number | null = null;
+  private isToolboxResizing = false;
 
   @Input() devmode;
   generator;
@@ -338,7 +344,7 @@ export class BlocklyComponent implements OnInit, OnDestroy {
     private electronService: ElectronService,
     private crossPlatformCmdService: CrossPlatformCmdService,
     private themeService: ThemeService,
-    private platformService: PlatformService
+    private platformService: PlatformService,
   ) {
     // Initialize GlobalServiceManager with BitmapUploadService
     const globalServiceManager = GlobalServiceManager.getInstance();
@@ -407,6 +413,8 @@ export class BlocklyComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.removeFlyoutPinControl();
+    this.cancelToolboxResizeAnimationFrame();
+    this.cancelWorkspaceResizeAnimationFrame();
     this.workspacePaneComponent?.blocklyHostElement?.removeEventListener('pointerdown', this.onWorkspacePointerDownBound, true);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -453,15 +461,98 @@ export class BlocklyComponent implements OnInit, OnDestroy {
     }
   }
 
+  onToolboxResizeStart(): void {
+    this.isToolboxResizing = true;
+  }
+
   onToolboxResize({ width }: NzResizeEvent): void {
-    if (!width) {
+    this.queueToolboxWidth(width);
+  }
+
+  onToolboxResizeEnd({ width }: NzResizeEvent): void {
+    this.flushToolboxWidth(width);
+    this.isToolboxResizing = false;
+  }
+
+  private queueToolboxWidth(width: number | undefined): void {
+    if (typeof width !== 'number' || !Number.isFinite(width)) {
       return;
     }
 
-    this.toolboxWidth = Math.min(this.toolboxMaxWidth, Math.max(this.toolboxMinWidth, width));
-    if (this.workspace) {
-      setTimeout(() => Blockly.svgResize(this.workspace), 0);
+    this.pendingToolboxWidth = this.clampToolboxWidth(width);
+    if (this.toolboxResizeAnimationFrame !== null) {
+      return;
     }
+
+    this.toolboxResizeAnimationFrame = requestAnimationFrame(() => {
+      this.toolboxResizeAnimationFrame = null;
+      this.applyQueuedToolboxWidth();
+    });
+  }
+
+  private flushToolboxWidth(width: number | undefined): void {
+    if (typeof width === 'number' && Number.isFinite(width)) {
+      this.pendingToolboxWidth = this.clampToolboxWidth(width);
+    }
+
+    this.cancelToolboxResizeAnimationFrame();
+    this.applyQueuedToolboxWidth();
+  }
+
+  private applyQueuedToolboxWidth(): void {
+    const nextWidth = this.pendingToolboxWidth;
+    if (nextWidth === this.toolboxWidth) {
+      return;
+    }
+
+    this.toolboxWidth = nextWidth;
+    this.applyToolboxWidth(nextWidth);
+    this.resizeWorkspace();
+  }
+
+  private applyToolboxWidth(width: number): void {
+    const widthPx = `${width}px`;
+    this.layoutElementRef.nativeElement.style.setProperty('grid-template-columns', `${widthPx} minmax(0, 1fr)`);
+    this.toolboxPaneRef.nativeElement.style.setProperty('width', widthPx);
+  }
+
+  private clampToolboxWidth(width: number): number {
+    return Math.min(this.toolboxMaxWidth, Math.max(this.toolboxMinWidth, Math.round(width)));
+  }
+
+  private scheduleWorkspaceResize(): void {
+    if (!this.workspace || this.workspaceResizeAnimationFrame !== null) {
+      return;
+    }
+
+    this.workspaceResizeAnimationFrame = requestAnimationFrame(() => {
+      this.workspaceResizeAnimationFrame = null;
+      this.resizeWorkspace();
+    });
+  }
+
+  private resizeWorkspace(): void {
+    if (this.workspace) {
+      Blockly.svgResize(this.workspace);
+    }
+  }
+
+  private cancelToolboxResizeAnimationFrame(): void {
+    if (this.toolboxResizeAnimationFrame === null) {
+      return;
+    }
+
+    cancelAnimationFrame(this.toolboxResizeAnimationFrame);
+    this.toolboxResizeAnimationFrame = null;
+  }
+
+  private cancelWorkspaceResizeAnimationFrame(): void {
+    if (this.workspaceResizeAnimationFrame === null) {
+      return;
+    }
+
+    cancelAnimationFrame(this.workspaceResizeAnimationFrame);
+    this.workspaceResizeAnimationFrame = null;
   }
 
   private initAiWritingSubscription(): void {
@@ -674,7 +765,11 @@ export class BlocklyComponent implements OnInit, OnDestroy {
 
       // 监听容器尺寸变化，刷新Blockly工作区
       this.resizeObserver = new ResizeObserver(() => {
-        Blockly.svgResize(this.workspace);
+        if (this.isToolboxResizing) {
+          return;
+        }
+
+        this.scheduleWorkspaceResize();
       });
       this.resizeObserver.observe(this.workspacePaneComponent.blocklyHostElement);
 
@@ -1081,7 +1176,7 @@ export class BlocklyComponent implements OnInit, OnDestroy {
         // Extract #include and #define, check for changes
         const currentDependencies = this.extractDependencies(code);
         if (currentDependencies !== this.previousDependencies) {
-          console.log('currentDependencies: ', currentDependencies);
+          // console.log('currentDependencies: ', currentDependencies);
           this.blocklyService.dependencySubject.next(currentDependencies);
           this.previousDependencies = currentDependencies;
         }
