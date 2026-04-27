@@ -6,7 +6,7 @@
         <div class="user-info">
             <div class="avatar ccenter" (click)="onAvatarClick()">
                 @if (currentUser?.avatar) {
-                <img [src]="currentUser.avatar" alt="用户头像" />
+                <img class="avatar-img" [src]="currentUser.avatar" alt="用户头像" />
                 } @else {
                 <i class="fa-thin fa-user"></i>
                 }
