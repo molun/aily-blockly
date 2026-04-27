@@ -209,7 +209,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
 
   readonly toolboxMinWidth = 160;
   readonly toolboxMaxWidth = 420;
-  toolboxWidth = 220;
+  toolboxWidth = 185;
   private pendingToolboxWidth = this.toolboxWidth;
   private toolboxResizeAnimationFrame: number | null = null;
   private workspaceResizeAnimationFrame: number | null = null;

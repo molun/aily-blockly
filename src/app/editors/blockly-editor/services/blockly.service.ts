@@ -472,6 +472,15 @@ export class BlocklyService {
     };
   }
 
+  getProjectAbiForSave(): any {
+    const document = this.getProjectDocument();
+    if (document.pages.length === 1) {
+      return this.composeWorkspacePayload(document.pages[0].content, document.sharedModel);
+    }
+
+    return document;
+  }
+
   // 加载 blockly 当前工作区的 JSON 数据
   loadWorkspaceJson(jsonData: any) {
     if (!this.workspace) {
