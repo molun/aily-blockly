@@ -1,4 +1,4 @@
-import { Component, ElementRef, Input, ViewChild, OnDestroy, OnInit, ChangeDetectorRef, effect } from '@angular/core';
+import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, EventEmitter, Input, OnDestroy, OnInit, Output, ViewChild, effect } from '@angular/core';
 import * as Blockly from 'blockly';
 import { Subject, combineLatest } from 'rxjs';
 import { debounceTime, takeUntil, map, distinctUntilChanged, pairwise, startWith } from 'rxjs/operators';
@@ -40,7 +40,7 @@ const BLOCKLY_LOCALES: { [key: string]: any } = {
 // } from './plugins/continuous-toolbox/src/index.js';
 import './plugins/toolbox-search/src/index';
 import './plugins/block-plus-minus/src/index.js';
-import { arduinoGenerator } from './generators/arduino/arduino';
+import { arduinoGenerator, type BlockCodeMapping } from './generators/arduino/arduino';
 import { micropythonGenerator } from './generators/micropython/micropython';
 import { BlocklyService } from '../../services/blockly.service';
 import { convertAbiToAbsWithLineMap } from '../../../../tools/aily-chat/public-api';
@@ -66,6 +66,7 @@ import '@blockly/field-colour-hsv-sliders';
 import { Multiselect } from './plugins/workspace-multiselect/index.js';
 import { PromptDialogComponent } from './components/prompt-dialog/prompt-dialog.component.js';
 import { NzModalModule, NzModalService } from 'ng-zorro-antd/modal';
+import { NzResizableModule, NzResizeEvent } from 'ng-zorro-antd/resizable';
 import * as BlockDynamicConnection from '@blockly/block-dynamic-connection';
 import { CommonModule } from '@angular/common';
 import { BitmapUploadService } from '../../services/bitmap-upload.service';
@@ -87,6 +88,11 @@ import {
 } from './theme.config';
 import type { ThemeMode } from '../../../../services/theme.service';
 import { ThemeService } from '../../../../services/theme.service';
+import { PlatformService } from '../../../../services/platform.service';
+import { applyWindowsBlocklyScrollbarThickness } from '../../utils/apply-windows-blockly-scrollbar-thickness';
+import { BlocklyToolboxPaneComponent } from './components/blockly-toolbox-pane/blockly-toolbox-pane.component';
+import { BlocklyWorkspacePagesComponent } from './components/blockly-workspace-pages/blockly-workspace-pages.component';
+import { CodeViewerIpcService } from '../../services/code-viewer-ipc.service';
 
 /** Flyout 图钉右侧额外留白：Blockly 垂直条在 injectionDiv；vScroll 不可见时 DOM 仍可能有宽度，需一并判断 */
 function flyoutPinRightExtraX(
@@ -137,8 +143,9 @@ class OverlayFlyoutMetricsManager extends (Blockly as any).MetricsManager {
     const svgMetrics = (this as any).getSvgMetrics();
     const toolboxMetrics = (this as any).getToolboxMetrics();
     const toolboxPosition = toolboxMetrics.position;
+    const useExternalToolbox = !!workspace.options?.externalToolboxHost;
 
-    if (workspace.getToolbox?.()) {
+    if (workspace.getToolbox?.() && !useExternalToolbox) {
       if (
         toolboxPosition == (Blockly as any).TOOLBOX_AT_TOP ||
         toolboxPosition == (Blockly as any).TOOLBOX_AT_BOTTOM
@@ -164,14 +171,15 @@ class OverlayFlyoutMetricsManager extends (Blockly as any).MetricsManager {
     const workspace = (this as any).workspace_;
     const toolboxMetrics = (this as any).getToolboxMetrics();
     const toolboxPosition = toolboxMetrics.position;
+    const useExternalToolbox = !!workspace.options?.externalToolboxHost;
 
     let absoluteLeft = 0;
-    if (workspace.getToolbox?.() && toolboxPosition == (Blockly as any).TOOLBOX_AT_LEFT) {
+    if (!useExternalToolbox && workspace.getToolbox?.() && toolboxPosition == (Blockly as any).TOOLBOX_AT_LEFT) {
       absoluteLeft = toolboxMetrics.width;
     }
 
     let absoluteTop = 0;
-    if (workspace.getToolbox?.() && toolboxPosition == (Blockly as any).TOOLBOX_AT_TOP) {
+    if (!useExternalToolbox && workspace.getToolbox?.() && toolboxPosition == (Blockly as any).TOOLBOX_AT_TOP) {
       absoluteTop = toolboxMetrics.height;
     }
 
@@ -182,17 +190,53 @@ class OverlayFlyoutMetricsManager extends (Blockly as any).MetricsManager {
   }
 }
 
+class ExternalToolboxDeleteArea extends Blockly.DeleteArea {
+  override id = 'ailyExternalToolboxDeleteArea';
+
+  constructor(private readonly getHostElement: () => HTMLElement | null) {
+    super();
+  }
+
+  override getClientRect(): Blockly.utils.Rect | null {
+    const hostElement = this.getHostElement();
+    if (!hostElement) {
+      return null;
+    }
+
+    const rect = hostElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    return new Blockly.utils.Rect(rect.top, rect.bottom, rect.left, rect.right);
+  }
+}
+
 @Component({
   selector: 'blockly-main',
   imports: [
     NzModalModule,
+    NzResizableModule,
     CommonModule,
+    BlocklyToolboxPaneComponent,
+    BlocklyWorkspacePagesComponent,
   ],
   templateUrl: './blockly.component.html',
   styleUrl: './blockly.component.scss',
 })
-export class BlocklyComponent implements OnInit, OnDestroy {
-  @ViewChild('blocklyDiv', { static: true }) blocklyDiv!: ElementRef;
+export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
+  @ViewChild(BlocklyWorkspacePagesComponent, { static: true }) workspacePaneComponent!: BlocklyWorkspacePagesComponent;
+  @ViewChild('layoutElement', { static: true }) private layoutElementRef!: ElementRef<HTMLDivElement>;
+  @ViewChild('toolboxPane', { static: true }) private toolboxPaneRef!: ElementRef<HTMLDivElement>;
+  @Output() libraryManagerRequested = new EventEmitter<void>();
+
+  readonly toolboxMinWidth = 160;
+  readonly toolboxMaxWidth = 420;
+  toolboxWidth = 185;
+  private pendingToolboxWidth = this.toolboxWidth;
+  private toolboxResizeAnimationFrame: number | null = null;
+  private workspaceResizeAnimationFrame: number | null = null;
+  private isToolboxResizing = false;
 
   @Input() devmode;
   generator;
@@ -201,11 +245,14 @@ export class BlocklyComponent implements OnInit, OnDestroy {
   private codeGenerationSubject = new Subject<void>();
   private minimapSyncSubject = new Subject<void>();
   private destroy$ = new Subject<void>();
+  private resizeObserver: ResizeObserver | null = null;
   private minimap: Minimap | null = null;
   /** Flyout 右上角固钉控件（foreignObject 根节点，便于挂在嵌套 SVG 内） */
   private flyoutPinForeignObject: SVGForeignObjectElement | null = null;
   private flyoutPinResizeObserver: ResizeObserver | null = null;
   private flyoutPinButton: HTMLButtonElement | null = null;
+  private externalToolboxDeleteArea: ExternalToolboxDeleteArea | null = null;
+  private readonly onWorkspacePointerDownBound = (event: PointerEvent) => this.onWorkspacePointerDown(event);
   // Track previous #include and #define for dependency change detection
   private previousDependencies = '';
   // Control bitmap upload handler visibility
@@ -248,7 +295,20 @@ export class BlocklyComponent implements OnInit, OnDestroy {
     return this.blocklyService.offsetY;
   }
 
+  get pages() {
+    return this.blocklyService.getPages();
+  }
+
+  get activePageId() {
+    return this.blocklyService.getActivePageId();
+  }
+
+  get closedPages() {
+    return this.blocklyService.getClosedPages();
+  }
+
   options = {
+    externalToolboxHost: true,
     flyout: 'overlay',
     toolbox: {
       kind: 'categoryToolbox',
@@ -307,7 +367,9 @@ export class BlocklyComponent implements OnInit, OnDestroy {
     private projectService: ProjectService,
     private electronService: ElectronService,
     private crossPlatformCmdService: CrossPlatformCmdService,
-    private themeService: ThemeService
+    private themeService: ThemeService,
+    private platformService: PlatformService,
+    private codeViewerIpcService: CodeViewerIpcService,
   ) {
     // Initialize GlobalServiceManager with BitmapUploadService
     const globalServiceManager = GlobalServiceManager.getInstance();
@@ -376,9 +438,148 @@ export class BlocklyComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.removeFlyoutPinControl();
+    this.unregisterExternalToolboxDeleteArea();
+    this.cancelToolboxResizeAnimationFrame();
+    this.cancelWorkspaceResizeAnimationFrame();
+    this.workspacePaneComponent?.blocklyHostElement?.removeEventListener('pointerdown', this.onWorkspacePointerDownBound, true);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     // 清理 RxJS 订阅
     this.destroy$.next();
     this.destroy$.complete();
+  }
+
+  onPageSelected(pageId: string) {
+    if (!pageId || !this.workspace) {
+      return;
+    }
+
+    this.workspace.hideChaff();
+    if (this.blocklyService.switchPage(pageId)) {
+      this.syncWorkspaceAfterPageChange();
+    }
+  }
+
+  onPageAdded() {
+    this.workspace?.hideChaff();
+    this.blocklyService.createPage();
+    this.syncWorkspaceAfterPageChange();
+  }
+
+  onPageClosed(pageId: string) {
+    if (!pageId) {
+      return;
+    }
+
+    this.workspace?.hideChaff();
+    this.blocklyService.closePage(pageId);
+    this.syncWorkspaceAfterPageChange();
+  }
+
+  onPageReopened(pageId: string) {
+    if (!pageId) {
+      return;
+    }
+
+    this.workspace?.hideChaff();
+    if (this.blocklyService.openPage(pageId, true)) {
+      this.syncWorkspaceAfterPageChange();
+    }
+  }
+
+  onToolboxResizeStart(): void {
+    this.isToolboxResizing = true;
+  }
+
+  onToolboxResize({ width }: NzResizeEvent): void {
+    this.queueToolboxWidth(width);
+  }
+
+  onToolboxResizeEnd({ width }: NzResizeEvent): void {
+    this.flushToolboxWidth(width);
+    this.isToolboxResizing = false;
+  }
+
+  private queueToolboxWidth(width: number | undefined): void {
+    if (typeof width !== 'number' || !Number.isFinite(width)) {
+      return;
+    }
+
+    this.pendingToolboxWidth = this.clampToolboxWidth(width);
+    if (this.toolboxResizeAnimationFrame !== null) {
+      return;
+    }
+
+    this.toolboxResizeAnimationFrame = requestAnimationFrame(() => {
+      this.toolboxResizeAnimationFrame = null;
+      this.applyQueuedToolboxWidth();
+    });
+  }
+
+  private flushToolboxWidth(width: number | undefined): void {
+    if (typeof width === 'number' && Number.isFinite(width)) {
+      this.pendingToolboxWidth = this.clampToolboxWidth(width);
+    }
+
+    this.cancelToolboxResizeAnimationFrame();
+    this.applyQueuedToolboxWidth();
+  }
+
+  private applyQueuedToolboxWidth(): void {
+    const nextWidth = this.pendingToolboxWidth;
+    if (nextWidth === this.toolboxWidth) {
+      return;
+    }
+
+    this.toolboxWidth = nextWidth;
+    this.applyToolboxWidth(nextWidth);
+    this.resizeWorkspace();
+  }
+
+  private applyToolboxWidth(width: number): void {
+    const widthPx = `${width}px`;
+    this.layoutElementRef.nativeElement.style.setProperty('grid-template-columns', `${widthPx} minmax(0, 1fr)`);
+    this.toolboxPaneRef.nativeElement.style.setProperty('width', widthPx);
+  }
+
+  private clampToolboxWidth(width: number): number {
+    return Math.min(this.toolboxMaxWidth, Math.max(this.toolboxMinWidth, Math.round(width)));
+  }
+
+  private scheduleWorkspaceResize(): void {
+    if (!this.workspace || this.workspaceResizeAnimationFrame !== null) {
+      return;
+    }
+
+    this.workspaceResizeAnimationFrame = requestAnimationFrame(() => {
+      this.workspaceResizeAnimationFrame = null;
+      this.resizeWorkspace();
+    });
+  }
+
+  private resizeWorkspace(): void {
+    if (this.workspace) {
+      Blockly.svgResize(this.workspace);
+      this.workspace.recordDragTargets();
+    }
+  }
+
+  private cancelToolboxResizeAnimationFrame(): void {
+    if (this.toolboxResizeAnimationFrame === null) {
+      return;
+    }
+
+    cancelAnimationFrame(this.toolboxResizeAnimationFrame);
+    this.toolboxResizeAnimationFrame = null;
+  }
+
+  private cancelWorkspaceResizeAnimationFrame(): void {
+    if (this.workspaceResizeAnimationFrame === null) {
+      return;
+    }
+
+    cancelAnimationFrame(this.workspaceResizeAnimationFrame);
+    this.workspaceResizeAnimationFrame = null;
   }
 
   private initAiWritingSubscription(): void {
@@ -496,8 +697,13 @@ export class BlocklyComponent implements OnInit, OnDestroy {
       this.options.theme = currentTheme === 'light' ? LightTheme : DarkTheme;
       this.options.grid.colour = blocklyGridColourForUiTheme(currentTheme);
 
-      this.workspace = Blockly.inject('blocklyDiv', this.options);
-
+      applyWindowsBlocklyScrollbarThickness(this.platformService.isWindows());
+      this.workspace = Blockly.inject(this.workspacePaneComponent.blocklyHostElement, this.options);
+      this.workspacePaneComponent.blocklyHostElement.addEventListener('pointerdown', this.onWorkspacePointerDownBound, true);
+      this.workspace.updateToolbox(this.toolbox);
+      this.registerExternalToolboxDeleteArea();
+      this.blocklyService.hydrateWorkspaceFromProjectState();
+      this.blocklyService.syncToolboxFacadeWithWorkspace();
       // 根据配置决定 flyout 拖出 block 后是否自动关闭（配置重载时会通过 configReloaded$ 实时应用）
       this.applyFlyoutAutoClose();
       this.setupFlyoutPinControl(0);
@@ -586,10 +792,14 @@ export class BlocklyComponent implements OnInit, OnDestroy {
       this.workspace.addChangeListener(BlockDynamicConnection.finalizeConnections);
 
       // 监听容器尺寸变化，刷新Blockly工作区
-      const resizeObserver = new ResizeObserver(() => {
-        Blockly.svgResize(this.workspace);
+      this.resizeObserver = new ResizeObserver(() => {
+        if (this.isToolboxResizing) {
+          return;
+        }
+
+        this.scheduleWorkspaceResize();
       });
-      resizeObserver.observe(this.blocklyDiv.nativeElement);
+      this.resizeObserver.observe(this.workspacePaneComponent.blocklyHostElement);
 
       (window as any)['Blockly'] = Blockly;
       // 设置全局工作区引用，供 editBlockTool 使用
@@ -601,13 +811,85 @@ export class BlocklyComponent implements OnInit, OnDestroy {
           this.minimapSyncSubject.next();
         }
 
+        if (event.type === Blockly.Events.TOOLBOX_ITEM_SELECT) {
+          this.blocklyService.syncToolboxFacadeWithWorkspace();
+        }
+
         // 监听 block 选中事件，更新 selectedBlockSubject
         if (event.type === Blockly.Events.SELECTED) {
-          this.blocklyService.selectedBlockSubject.next(event.newElementId || null);
+          const selectedBlockId = event.newElementId || null;
+          this.blocklyService.selectedBlockSubject.next(selectedBlockId);
+          this.codeViewerIpcService.publishSelection(selectedBlockId);
         }
       });
       this.initLanguage();
     }, 100);
+  }
+
+  private syncWorkspaceAfterPageChange() {
+    if (!this.workspace) {
+      return;
+    }
+
+    setTimeout(() => {
+      Blockly.svgResize(this.workspace);
+      this.workspace.render();
+      this.blocklyService.syncToolboxFacadeWithWorkspace();
+      this.minimapSyncSubject.next();
+      this.codeGenerationSubject.next();
+    }, 0);
+  }
+
+  private onWorkspacePointerDown(event: PointerEvent) {
+    const target = event.target as Element | null;
+    if (!target || this.isPointerInsideFlyout(target)) {
+      return;
+    }
+
+    if (target.closest('.blocklySvg')) {
+      this.blocklyService.closeToolboxSearchFlyout();
+    }
+  }
+
+  private isPointerInsideFlyout(target: Element): boolean {
+    return !!target.closest(
+      '.blocklyFlyout, .blocklyFlyoutScrollbar, .blocklyWidgetDiv, .blocklyDropDownDiv, .aily-flyout-pin-xhtml',
+    );
+  }
+
+  private registerExternalToolboxDeleteArea(): void {
+    if (!this.workspace) {
+      return;
+    }
+
+    this.unregisterExternalToolboxDeleteArea(false);
+    this.externalToolboxDeleteArea = new ExternalToolboxDeleteArea(() => this.toolboxPaneRef?.nativeElement ?? null);
+    this.workspace.getComponentManager().addComponent({
+      component: this.externalToolboxDeleteArea,
+      capabilities: [
+        Blockly.ComponentManager.Capability.DRAG_TARGET,
+        Blockly.ComponentManager.Capability.DELETE_AREA,
+      ],
+      weight: 0,
+    }, true);
+    this.workspace.recordDragTargets();
+  }
+
+  private unregisterExternalToolboxDeleteArea(recordDragTargets = true): void {
+    if (!this.workspace || !this.externalToolboxDeleteArea) {
+      return;
+    }
+
+    try {
+      this.workspace.getComponentManager().removeComponent(this.externalToolboxDeleteArea.id);
+    } catch (error) {
+      console.warn('[Blockly] Failed to unregister external toolbox delete area:', error);
+    }
+    this.externalToolboxDeleteArea = null;
+
+    if (recordDragTargets) {
+      this.workspace.recordDragTargets();
+    }
   }
 
   /** 切换 UI 主题时同步 Blockly 网格 SVG 描边（inject 后需手动更新，见 Grid.createDom） */
@@ -946,20 +1228,26 @@ export class BlocklyComponent implements OnInit, OnDestroy {
       try {
         const code = this.generator.workspaceToCode(this.workspace);
         this.blocklyService.codeSubject.next(code);
+        let blockCodeMap = new Map<string, BlockCodeMapping>();
 
         // 发布 block-to-code 映射
         if (this.generator.blockCodeMap) {
-          this.blocklyService.blockCodeMapSubject.next(
-            new Map(this.generator.blockCodeMap)
-          );
+          blockCodeMap = new Map(this.generator.blockCodeMap);
+          this.blocklyService.blockCodeMapSubject.next(blockCodeMap);
           // 工作区变更后更新 ABS 行号映射（与用户下次导出 ABS 时的行号一致）
           this.updateAbsBlockLineMap();
         }
 
+        this.codeViewerIpcService.publishCodeState(
+          code,
+          blockCodeMap,
+          this.blocklyService.selectedBlockSubject.value,
+        );
+
         // Extract #include and #define, check for changes
         const currentDependencies = this.extractDependencies(code);
         if (currentDependencies !== this.previousDependencies) {
-          console.log('currentDependencies: ', currentDependencies);
+          // console.log('currentDependencies: ', currentDependencies);
           this.blocklyService.dependencySubject.next(currentDependencies);
           this.previousDependencies = currentDependencies;
         }

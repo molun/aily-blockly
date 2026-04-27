@@ -1,7 +1,7 @@
 {
   "name": "aily-blockly",
   "productName": "aily blockly",
-  "version": "0.9.45",
+  "version": "0.9.46",
   "author": "coloz",
   "description": "aily blockly dev",
   "main": "electron/main.js",
@@ -19,6 +19,9 @@
       "electron/preload.js",
       "electron/node_modules/**/*.node",
       "electron/node_modules/@lydell/**",
+      "electron/node_modules/debug/**",
+      "electron/node_modules/ms/**",
+      "electron/node_modules/node-gyp-build/**",
       "electron/node_modules/@serialport/**",
       "electron/node_modules/serialport/**"
     ],
@@ -197,6 +200,7 @@
     "penpal": "^7.0.6",
     "pinyin-pro": "^3.26.0",
     "rxjs": "~7.8.0",
+    "semver": "^7.7.4",
     "shiki": "^3.5.0",
     "simplebar-angular": "^3.3.0",
     "sortablejs": "^1.15.6",
