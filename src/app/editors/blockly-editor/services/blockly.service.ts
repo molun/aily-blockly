@@ -41,6 +41,8 @@ export interface BlocklyToolboxFacadeItem {
   iconClass: string;
   selectable: boolean;
   toolboxItemId: string;
+  libraryName?: string | null;
+  libraryPath?: string | null;
   parentKey: string | null;
   level: number;
   expanded: boolean;
@@ -573,6 +575,7 @@ export class BlocklyService {
           if (i18nData) {
             toolbox = processToolboxI18n(toolbox, i18nData);
           }
+          this.attachLibraryMetadataToToolbox(toolbox, libPackageName, libPackagePath);
           this.loadLibToolbox(toolbox);
         }
       } else {
@@ -651,6 +654,41 @@ export class BlocklyService {
     }
     this.rebuildToolboxFacade();
     this.syncToolboxFacadeWithWorkspace();
+  }
+
+  private attachLibraryMetadataToToolbox(toolboxItem: any, libraryName: string, libraryPath: string) {
+    if (!toolboxItem || typeof toolboxItem !== 'object') {
+      return;
+    }
+
+    if (toolboxItem.kind === 'category') {
+      toolboxItem.ailyLibraryName = libraryName;
+      toolboxItem.ailyLibraryPath = libraryPath;
+    }
+
+    if (Array.isArray(toolboxItem.contents)) {
+      toolboxItem.contents.forEach((child: any) => this.attachLibraryMetadataToToolbox(child, libraryName, libraryPath));
+    }
+  }
+
+  isLibraryUsedByCurrentProject(libPackagePath: string): boolean {
+    if (!libPackagePath) {
+      return false;
+    }
+
+    const libBlockPath = this.electronService.pathJoin(libPackagePath, 'block.json');
+    if (!this.electronService.exists(libBlockPath)) {
+      return false;
+    }
+
+    try {
+      const blocksData = JSON.parse(this.electronService.readFile(libBlockPath));
+      const abiJson = JSON.stringify(this.getProjectDocument());
+      return blocksData.some((block: any) => block?.type && abiJson.includes(block.type));
+    } catch (error) {
+      console.error('检查库使用情况失败:', libPackagePath, error);
+      return false;
+    }
   }
 
   loadLibGenerator(filePath): Promise<boolean> {
@@ -1005,6 +1043,8 @@ export class BlocklyService {
       iconClass: item.icon || 'fa-light fa-cube',
       selectable: true,
       toolboxItemId: item.toolboxitemid || item.categoryId || `${item.kind}:${item.name}`,
+      libraryName: item.ailyLibraryName || null,
+      libraryPath: item.ailyLibraryPath || null,
       parentKey,
       level,
       expanded: this.normalizeToolboxExpandedState(item.expanded, false),

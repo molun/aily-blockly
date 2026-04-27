@@ -27,7 +27,7 @@
 
 <ng-template #toolboxNode let-item>
   <div class="toolbox-node">
-    <div class="toolbox-row" [class.selected]="selectedKey === item.key">
+    <div class="toolbox-row" [class.selected]="selectedKey === item.key" (contextmenu)="onToolboxItemContextMenu(item, $event)">
       <button type="button" class="toolbox-item" [style.padding-left.px]="5 + item.level * 16"
         (click)="onCategoryClick(item)">
         <span class="toolbox-item__icon">
@@ -51,3 +51,8 @@
     </div>
   </div>
 </ng-template>
+
+@if (showContextMenu) {
+<app-menu class="toolbox-context-menu" [position]="contextMenuPosition" [menuList]="contextMenuItems"
+  (itemClickEvent)="onContextMenuItemClick($event)" (closeEvent)="closeContextMenu()"></app-menu>
+}
