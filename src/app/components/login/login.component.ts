@@ -142,6 +142,22 @@ export class LoginComponent implements OnDestroy {
     return (this.configService.data?.region || 'cn').toLowerCase();
   }
 
+  private getLoginErrorMessage(error: any, fallback?: string): string {
+    const defaultMessage = fallback || this.translate.instant('LOGIN.LOGIN_FAILED') || '登录失败';
+    const rawMessage = error?.error?.messages ?? error?.error?.message ?? error?.messages ?? error?.message;
+
+    if (Array.isArray(rawMessage)) {
+      const joinedMessage = rawMessage.filter(Boolean).join(', ').trim();
+      return joinedMessage || defaultMessage;
+    }
+
+    if (typeof rawMessage === 'string' && rawMessage.trim()) {
+      return rawMessage.trim();
+    }
+
+    return defaultMessage;
+  }
+
   mode = 'mail'; // 默认选中邮箱登录
   select(mode) {
     this.mode = mode;
@@ -561,15 +577,16 @@ export class LoginComponent implements OnDestroy {
             this.codeSent = false;
             this.message.success(this.translate.instant('LOGIN.LOGIN_SUCCESS'));
           } else {
-            this.message.error(
-              response.message || this.translate.instant('LOGIN.LOGIN_FAILED'),
-            );
+            this.message.error(this.getLoginErrorMessage(response));
           }
         },
         error: (error) => {
           console.error('邮箱登录错误:', error);
           this.message.error(
-            this.translate.instant('LOGIN.LOGIN_NETWORK_ERROR'),
+            this.getLoginErrorMessage(
+              error,
+              this.translate.instant('LOGIN.LOGIN_NETWORK_ERROR') || '登录失败，请检查网络连接',
+            ),
           );
         },
         complete: () => {
@@ -578,7 +595,7 @@ export class LoginComponent implements OnDestroy {
       });
     } catch (error) {
       console.error('邮箱登录过程中出错:', error);
-      this.message.error(this.translate.instant('LOGIN.LOGIN_FAILED'));
+      this.message.error(this.getLoginErrorMessage(error));
       this.isWaiting = false;
     }
   }
@@ -827,11 +844,21 @@ export class LoginComponent implements OnDestroy {
           this.message.success(this.translate.instant('LOGIN.CODE_SENT'));
           this.startEmailBindCountdown();
         } else {
-          this.message.error(response.message || this.translate.instant('LOGIN.CODE_SEND_FAILED'));
+          this.message.error(
+            this.getLoginErrorMessage(
+              response,
+              this.translate.instant('LOGIN.CODE_SEND_FAILED') || '验证码发送失败',
+            ),
+          );
         }
       },
-      error: () => {
-        this.message.error(this.translate.instant('LOGIN.CODE_SEND_FAILED'));
+      error: (error) => {
+        this.message.error(
+          this.getLoginErrorMessage(
+            error,
+            this.translate.instant('LOGIN.CODE_SEND_FAILED') || '验证码发送失败',
+          ),
+        );
       },
     });
   }
@@ -895,14 +922,13 @@ export class LoginComponent implements OnDestroy {
                         this.cdr.detectChanges();
                       });
                     } else {
-                      this.message.error('合并失败，请重试');
+                      this.message.error(this.getLoginErrorMessage(mergeResponse, '合并失败，请重试'));
                       this.emailBindIsSubmitting = false;
                       this.cdr.detectChanges();
                     }
                   },
                   error: (err) => {
-                    const msg = err?.error?.messages || err?.error?.message || '合并失败，请重试';
-                    this.message.error(msg);
+                    this.message.error(this.getLoginErrorMessage(err, '合并失败，请重试'));
                     this.emailBindIsSubmitting = false;
                     this.cdr.detectChanges();
                   },
@@ -933,15 +959,14 @@ export class LoginComponent implements OnDestroy {
             this.cdr.detectChanges();
           });
         } else {
-          this.message.error(response.message || '绑定失败');
+          this.message.error(this.getLoginErrorMessage(response, '绑定失败'));
           this.emailBindIsSubmitting = false;
           this.cdr.detectChanges();
         }
       },
       error: (error) => {
         console.error('邮箱绑定登录失败:', error);
-        const msg = error?.error?.messages || error?.error?.message || '绑定失败，请重试';
-        this.message.error(msg);
+        this.message.error(this.getLoginErrorMessage(error, '绑定失败，请重试'));
         this.emailBindIsSubmitting = false;
         this.cdr.detectChanges();
       },

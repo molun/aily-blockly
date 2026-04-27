@@ -602,6 +602,7 @@
         "GITHUB_ERROR": "GitHub login failed",
         "ENTER_CREDENTIALS": "Please enter username and password",
         "LOGIN_SUCCESS": "Login successful",
+        "WECHAT_REGISTER_SUCCESS": "Registration successful",
         "LOGIN_FAILED": "Login failed",
         "LOGIN_NETWORK_ERROR": "Login failed, please check network connection",
         "AGREEMENT_PREFIX": "I have read and agree to the",

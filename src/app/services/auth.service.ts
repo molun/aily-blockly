@@ -8,6 +8,7 @@ import { ElectronService } from './electron.service';
 export interface CommonResponse {
   status: number;
   message: string;
+  messages?: string | string[];
   data?: any;
 }
 
@@ -20,6 +21,7 @@ export interface LoginRequest {
 export interface LoginResponse {
   status: number;
   message: string;
+  messages?: string | string[];
   data?: {
     access_token: string;
     refresh_token?: string;
