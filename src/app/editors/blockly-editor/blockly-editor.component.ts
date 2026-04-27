@@ -23,6 +23,7 @@ import { BLOCKLY_ONBOARDING_CONFIG } from '../../configs/onboarding.config';
 import { NoticeService } from '../../services/notice.service';
 import { FloatSiderComponent } from '../../components/float-sider/float-sider.component';
 import { LocalLibrarySyncService } from '../../services/local-library-sync.service';
+import { CodeViewerIpcService } from './services/code-viewer-ipc.service';
 
 @Component({
   selector: 'app-blockly-editor',
@@ -71,6 +72,7 @@ export class BlocklyEditorComponent implements OnInit, AfterViewInit, OnDestroy 
     private el: ElementRef,
     private ngZone: NgZone,
     private localLibrarySyncService: LocalLibrarySyncService,
+    private codeViewerIpcService: CodeViewerIpcService,
   ) { }
 
   ngOnInit(): void {
@@ -133,6 +135,7 @@ export class BlocklyEditorComponent implements OnInit, AfterViewInit, OnDestroy 
     this._builderService.destroy();
     this._uploadService.cancel();
     this._uploadService.destroy();
+    this.codeViewerIpcService.clear();
     this.electronService.setTitle('aily blockly');
     this.blocklyService.reset();
     this.el.nativeElement.removeEventListener('mousemove', this._onMouseMoveBound);

@@ -40,7 +40,7 @@ const BLOCKLY_LOCALES: { [key: string]: any } = {
 // } from './plugins/continuous-toolbox/src/index.js';
 import './plugins/toolbox-search/src/index';
 import './plugins/block-plus-minus/src/index.js';
-import { arduinoGenerator } from './generators/arduino/arduino';
+import { arduinoGenerator, type BlockCodeMapping } from './generators/arduino/arduino';
 import { micropythonGenerator } from './generators/micropython/micropython';
 import { BlocklyService } from '../../services/blockly.service';
 import { convertAbiToAbsWithLineMap } from '../../../../tools/aily-chat/public-api';
@@ -92,6 +92,7 @@ import { PlatformService } from '../../../../services/platform.service';
 import { applyWindowsBlocklyScrollbarThickness } from '../../utils/apply-windows-blockly-scrollbar-thickness';
 import { BlocklyToolboxPaneComponent } from './components/blockly-toolbox-pane/blockly-toolbox-pane.component';
 import { BlocklyWorkspacePagesComponent } from './components/blockly-workspace-pages/blockly-workspace-pages.component';
+import { CodeViewerIpcService } from '../../services/code-viewer-ipc.service';
 
 /** Flyout 图钉右侧额外留白：Blockly 垂直条在 injectionDiv；vScroll 不可见时 DOM 仍可能有宽度，需一并判断 */
 function flyoutPinRightExtraX(
@@ -345,6 +346,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
     private crossPlatformCmdService: CrossPlatformCmdService,
     private themeService: ThemeService,
     private platformService: PlatformService,
+    private codeViewerIpcService: CodeViewerIpcService,
   ) {
     // Initialize GlobalServiceManager with BitmapUploadService
     const globalServiceManager = GlobalServiceManager.getInstance();
@@ -789,7 +791,9 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
 
         // 监听 block 选中事件，更新 selectedBlockSubject
         if (event.type === Blockly.Events.SELECTED) {
-          this.blocklyService.selectedBlockSubject.next(event.newElementId || null);
+          const selectedBlockId = event.newElementId || null;
+          this.blocklyService.selectedBlockSubject.next(selectedBlockId);
+          this.codeViewerIpcService.publishSelection(selectedBlockId);
         }
       });
       this.initLanguage();
@@ -1163,15 +1167,21 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
       try {
         const code = this.generator.workspaceToCode(this.workspace);
         this.blocklyService.codeSubject.next(code);
+        let blockCodeMap = new Map<string, BlockCodeMapping>();
 
         // 发布 block-to-code 映射
         if (this.generator.blockCodeMap) {
-          this.blocklyService.blockCodeMapSubject.next(
-            new Map(this.generator.blockCodeMap)
-          );
+          blockCodeMap = new Map(this.generator.blockCodeMap);
+          this.blocklyService.blockCodeMapSubject.next(blockCodeMap);
           // 工作区变更后更新 ABS 行号映射（与用户下次导出 ABS 时的行号一致）
           this.updateAbsBlockLineMap();
         }
+
+        this.codeViewerIpcService.publishCodeState(
+          code,
+          blockCodeMap,
+          this.blocklyService.selectedBlockSubject.value,
+        );
 
         // Extract #include and #define, check for changes
         const currentDependencies = this.extractDependencies(code);
