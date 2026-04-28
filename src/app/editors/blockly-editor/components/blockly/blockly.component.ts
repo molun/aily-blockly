@@ -40,7 +40,7 @@ const BLOCKLY_LOCALES: { [key: string]: any } = {
 // } from './plugins/continuous-toolbox/src/index.js';
 import './plugins/toolbox-search/src/index';
 import './plugins/block-plus-minus/src/index.js';
-import { arduinoGenerator } from './generators/arduino/arduino';
+import { arduinoGenerator, type BlockCodeMapping } from './generators/arduino/arduino';
 import { micropythonGenerator } from './generators/micropython/micropython';
 import { BlocklyService } from '../../services/blockly.service';
 import { convertAbiToAbsWithLineMap } from '../../../../tools/aily-chat/public-api';
@@ -92,6 +92,7 @@ import { PlatformService } from '../../../../services/platform.service';
 import { applyWindowsBlocklyScrollbarThickness } from '../../utils/apply-windows-blockly-scrollbar-thickness';
 import { BlocklyToolboxPaneComponent } from './components/blockly-toolbox-pane/blockly-toolbox-pane.component';
 import { BlocklyWorkspacePagesComponent } from './components/blockly-workspace-pages/blockly-workspace-pages.component';
+import { CodeViewerIpcService } from '../../services/code-viewer-ipc.service';
 
 /** Flyout 图钉右侧额外留白：Blockly 垂直条在 injectionDiv；vScroll 不可见时 DOM 仍可能有宽度，需一并判断 */
 function flyoutPinRightExtraX(
@@ -189,6 +190,28 @@ class OverlayFlyoutMetricsManager extends (Blockly as any).MetricsManager {
   }
 }
 
+class ExternalToolboxDeleteArea extends Blockly.DeleteArea {
+  override id = 'ailyExternalToolboxDeleteArea';
+
+  constructor(private readonly getHostElement: () => HTMLElement | null) {
+    super();
+  }
+
+  override getClientRect(): Blockly.utils.Rect | null {
+    const hostElement = this.getHostElement();
+    if (!hostElement) {
+      return null;
+    }
+
+    const rect = hostElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    return new Blockly.utils.Rect(rect.top, rect.bottom, rect.left, rect.right);
+  }
+}
+
 @Component({
   selector: 'blockly-main',
   imports: [
@@ -228,6 +251,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
   private flyoutPinForeignObject: SVGForeignObjectElement | null = null;
   private flyoutPinResizeObserver: ResizeObserver | null = null;
   private flyoutPinButton: HTMLButtonElement | null = null;
+  private externalToolboxDeleteArea: ExternalToolboxDeleteArea | null = null;
   private readonly onWorkspacePointerDownBound = (event: PointerEvent) => this.onWorkspacePointerDown(event);
   // Track previous #include and #define for dependency change detection
   private previousDependencies = '';
@@ -345,6 +369,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
     private crossPlatformCmdService: CrossPlatformCmdService,
     private themeService: ThemeService,
     private platformService: PlatformService,
+    private codeViewerIpcService: CodeViewerIpcService,
   ) {
     // Initialize GlobalServiceManager with BitmapUploadService
     const globalServiceManager = GlobalServiceManager.getInstance();
@@ -413,6 +438,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.removeFlyoutPinControl();
+    this.unregisterExternalToolboxDeleteArea();
     this.cancelToolboxResizeAnimationFrame();
     this.cancelWorkspaceResizeAnimationFrame();
     this.workspacePaneComponent?.blocklyHostElement?.removeEventListener('pointerdown', this.onWorkspacePointerDownBound, true);
@@ -534,6 +560,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
   private resizeWorkspace(): void {
     if (this.workspace) {
       Blockly.svgResize(this.workspace);
+      this.workspace.recordDragTargets();
     }
   }
 
@@ -674,6 +701,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
       this.workspace = Blockly.inject(this.workspacePaneComponent.blocklyHostElement, this.options);
       this.workspacePaneComponent.blocklyHostElement.addEventListener('pointerdown', this.onWorkspacePointerDownBound, true);
       this.workspace.updateToolbox(this.toolbox);
+      this.registerExternalToolboxDeleteArea();
       this.blocklyService.hydrateWorkspaceFromProjectState();
       this.blocklyService.syncToolboxFacadeWithWorkspace();
       // 根据配置决定 flyout 拖出 block 后是否自动关闭（配置重载时会通过 configReloaded$ 实时应用）
@@ -789,7 +817,9 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
 
         // 监听 block 选中事件，更新 selectedBlockSubject
         if (event.type === Blockly.Events.SELECTED) {
-          this.blocklyService.selectedBlockSubject.next(event.newElementId || null);
+          const selectedBlockId = event.newElementId || null;
+          this.blocklyService.selectedBlockSubject.next(selectedBlockId);
+          this.codeViewerIpcService.publishSelection(selectedBlockId);
         }
       });
       this.initLanguage();
@@ -825,6 +855,41 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
     return !!target.closest(
       '.blocklyFlyout, .blocklyFlyoutScrollbar, .blocklyWidgetDiv, .blocklyDropDownDiv, .aily-flyout-pin-xhtml',
     );
+  }
+
+  private registerExternalToolboxDeleteArea(): void {
+    if (!this.workspace) {
+      return;
+    }
+
+    this.unregisterExternalToolboxDeleteArea(false);
+    this.externalToolboxDeleteArea = new ExternalToolboxDeleteArea(() => this.toolboxPaneRef?.nativeElement ?? null);
+    this.workspace.getComponentManager().addComponent({
+      component: this.externalToolboxDeleteArea,
+      capabilities: [
+        Blockly.ComponentManager.Capability.DRAG_TARGET,
+        Blockly.ComponentManager.Capability.DELETE_AREA,
+      ],
+      weight: 0,
+    }, true);
+    this.workspace.recordDragTargets();
+  }
+
+  private unregisterExternalToolboxDeleteArea(recordDragTargets = true): void {
+    if (!this.workspace || !this.externalToolboxDeleteArea) {
+      return;
+    }
+
+    try {
+      this.workspace.getComponentManager().removeComponent(this.externalToolboxDeleteArea.id);
+    } catch (error) {
+      console.warn('[Blockly] Failed to unregister external toolbox delete area:', error);
+    }
+    this.externalToolboxDeleteArea = null;
+
+    if (recordDragTargets) {
+      this.workspace.recordDragTargets();
+    }
   }
 
   /** 切换 UI 主题时同步 Blockly 网格 SVG 描边（inject 后需手动更新，见 Grid.createDom） */
@@ -1163,15 +1228,21 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
       try {
         const code = this.generator.workspaceToCode(this.workspace);
         this.blocklyService.codeSubject.next(code);
+        let blockCodeMap = new Map<string, BlockCodeMapping>();
 
         // 发布 block-to-code 映射
         if (this.generator.blockCodeMap) {
-          this.blocklyService.blockCodeMapSubject.next(
-            new Map(this.generator.blockCodeMap)
-          );
+          blockCodeMap = new Map(this.generator.blockCodeMap);
+          this.blocklyService.blockCodeMapSubject.next(blockCodeMap);
           // 工作区变更后更新 ABS 行号映射（与用户下次导出 ABS 时的行号一致）
           this.updateAbsBlockLineMap();
         }
+
+        this.codeViewerIpcService.publishCodeState(
+          code,
+          blockCodeMap,
+          this.blocklyService.selectedBlockSubject.value,
+        );
 
         // Extract #include and #define, check for changes
         const currentDependencies = this.extractDependencies(code);
