@@ -1,14 +1,9 @@
 import * as Blockly from 'blockly/core';
 
-Blockly.Msg['LED_MATRIX_IMAGE_MODE_MONO'] = 'Mono';
-Blockly.Msg['LED_MATRIX_IMAGE_MODE_RGB'] = 'RGB';
-Blockly.Msg['LED_MATRIX_IMAGE_BUTTON_APPLY'] = 'Apply';
 Blockly.Msg['LED_MATRIX_IMAGE_BUTTON_CLEAR'] = 'Clear';
 Blockly.Msg['LED_MATRIX_IMAGE_BUTTON_FILL'] = 'Fill';
-Blockly.Msg['LED_MATRIX_IMAGE_BUTTON_PAINT'] = 'Paint';
-Blockly.Msg['LED_MATRIX_IMAGE_BUTTON_ERASE'] = 'Erase';
-Blockly.Msg['LED_MATRIX_IMAGE_LABEL_MODE'] = 'Mode';
 Blockly.Msg['LED_MATRIX_IMAGE_LABEL_COLOR'] = 'Color';
+Blockly.Msg['LED_MATRIX_IMAGE_HINT_MOUSE'] = '鼠标左键绘制，右键擦除';
 
 export const DEFAULT_HEIGHT = 8;
 export const DEFAULT_WIDTH = 8;
@@ -41,8 +36,6 @@ export interface LedMatrixImageValue {
     pixels: LedMatrixImagePixel[][];
 }
 
-type BrushMode = 'paint' | 'erase';
-
 /**
  * Field for editing monochrome and RGB LED matrix images.
  */
@@ -64,20 +57,16 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
     private editorCanvas: HTMLCanvasElement | null = null;
     private editorContext: CanvasRenderingContext2D | null = null;
     private blockDisplayImage: SVGImageElement | null = null;
-    private modeSelect: HTMLSelectElement | null = null;
     private widthInput: HTMLInputElement | null = null;
     private heightInput: HTMLInputElement | null = null;
     private colourInput: HTMLInputElement | null = null;
     private colourControl: HTMLElement | null = null;
-    private paintButton: HTMLButtonElement | null = null;
-    private eraseButton: HTMLButtonElement | null = null;
 
     private pointerIsDown = false;
     private lastPaintedRow = -1;
     private lastPaintedCol = -1;
     private dragPixelValue: LedMatrixImagePixel | undefined;
     private selectedColour = DEFAULT_SELECTED_COLOUR;
-    private brushMode: BrushMode = 'paint';
 
     buttonOptions: LedMatrixImageButtons;
     pixelColours: LedMatrixImageColours;
@@ -167,6 +156,7 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         if (dimensionsChanged) {
             this.resizeEditorCanvas();
             this.updateSize_();
+            this.rerenderSourceBlock();
         }
 
         this.updateBlockDisplayImage();
@@ -257,13 +247,10 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         this.editorCanvas = null;
         this.editorContext = null;
         this.blockDisplayImage = null;
-        this.modeSelect = null;
         this.widthInput = null;
         this.heightInput = null;
         this.colourInput = null;
         this.colourControl = null;
-        this.paintButton = null;
-        this.eraseButton = null;
         super.dispose();
     }
 
@@ -286,6 +273,10 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         canvasContainer.appendChild(this.editorCanvas);
         dropdownEditor.appendChild(canvasContainer);
 
+        const mouseHint = this.createElementWithClassname('div', 'hint-ledMatrixImage');
+        mouseHint.textContent = Blockly.Msg['LED_MATRIX_IMAGE_HINT_MOUSE'];
+        dropdownEditor.appendChild(mouseHint);
+
         this.editorContext = this.editorCanvas.getContext('2d');
         if (!this.editorContext) {
             throw new Error('Unable to get canvas 2d context');
@@ -307,16 +298,16 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
     private createToolbar() {
         const toolbar = this.createElementWithClassname('div', 'toolbar-ledMatrixImage');
 
-        const modeControl = this.createElementWithClassname('label', 'controlGroup-ledMatrixImage');
-        modeControl.appendChild(this.createLabel(Blockly.Msg['LED_MATRIX_IMAGE_LABEL_MODE']));
+        const dimensionGroup = this.createElementWithClassname('div', 'dimensionGroup-ledMatrixImage');
+        this.widthInput = this.createDimensionInput('W', this.imgWidth, this.minWidth, this.maxWidth);
+        this.heightInput = this.createDimensionInput('H', this.imgHeight, this.minHeight, this.maxHeight);
+        this.bindDimensionInputEvents(this.widthInput);
+        this.bindDimensionInputEvents(this.heightInput);
+        dimensionGroup.appendChild(this.createDimensionControl('W', this.widthInput));
+        dimensionGroup.appendChild(this.createDimensionControl('H', this.heightInput));
+        toolbar.appendChild(dimensionGroup);
 
-        this.modeSelect = document.createElement('select');
-        this.modeSelect.className = 'select-ledMatrixImage';
-        this.modeSelect.appendChild(this.createOption('mono', Blockly.Msg['LED_MATRIX_IMAGE_MODE_MONO']));
-        this.modeSelect.appendChild(this.createOption('rgb', Blockly.Msg['LED_MATRIX_IMAGE_MODE_RGB']));
-        this.bindEvent(this.modeSelect, 'change', this.onModeSelectChange.bind(this));
-        modeControl.appendChild(this.modeSelect);
-        toolbar.appendChild(modeControl);
+        const rightControls = this.createElementWithClassname('div', 'rightControls-ledMatrixImage');
 
         this.colourControl = this.createElementWithClassname('label', 'controlGroup-ledMatrixImage');
         this.colourControl.appendChild(this.createLabel(Blockly.Msg['LED_MATRIX_IMAGE_LABEL_COLOR']));
@@ -326,32 +317,7 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         this.colourInput.value = this.selectedColour;
         this.bindEvent(this.colourInput, 'input', this.onColourInputChange.bind(this));
         this.colourControl.appendChild(this.colourInput);
-        toolbar.appendChild(this.colourControl);
-
-        const dimensionGroup = this.createElementWithClassname('div', 'dimensionGroup-ledMatrixImage');
-        this.widthInput = this.createDimensionInput('W', this.imgWidth, this.minWidth, this.maxWidth);
-        this.heightInput = this.createDimensionInput('H', this.imgHeight, this.minHeight, this.maxHeight);
-        dimensionGroup.appendChild(this.createDimensionControl('W', this.widthInput));
-        dimensionGroup.appendChild(this.createDimensionControl('H', this.heightInput));
-        this.addControlButton(
-            dimensionGroup,
-            Blockly.Msg['LED_MATRIX_IMAGE_BUTTON_APPLY'],
-            this.applyDimensionInputs.bind(this),
-        );
-        toolbar.appendChild(dimensionGroup);
-
-        const brushGroup = this.createElementWithClassname('div', 'buttonGroup-ledMatrixImage');
-        this.paintButton = this.addControlButton(
-            brushGroup,
-            Blockly.Msg['LED_MATRIX_IMAGE_BUTTON_PAINT'],
-            () => this.setBrushMode('paint'),
-        );
-        this.eraseButton = this.addControlButton(
-            brushGroup,
-            Blockly.Msg['LED_MATRIX_IMAGE_BUTTON_ERASE'],
-            () => this.setBrushMode('erase'),
-        );
-        toolbar.appendChild(brushGroup);
+        rightControls.appendChild(this.colourControl);
 
         const actionGroup = this.createElementWithClassname('div', 'buttonGroup-ledMatrixImage');
         if (this.buttonOptions.fill) {
@@ -368,7 +334,8 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
                 this.clearPixels.bind(this),
             );
         }
-        toolbar.appendChild(actionGroup);
+        rightControls.appendChild(actionGroup);
+        toolbar.appendChild(rightControls);
 
         return toolbar;
     }
@@ -378,13 +345,6 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         label.className = 'label-ledMatrixImage';
         label.textContent = text;
         return label;
-    }
-
-    private createOption(value: LedMatrixImageMode, label: string) {
-        const option = document.createElement('option');
-        option.value = value;
-        option.textContent = label;
-        return option;
     }
 
     private createDimensionInput(
@@ -408,6 +368,11 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         control.appendChild(this.createLabel(labelText));
         control.appendChild(input);
         return control;
+    }
+
+    private bindDimensionInputEvents(input: HTMLInputElement) {
+        this.bindEvent(input, 'input', this.onDimensionInputChange.bind(this));
+        this.bindEvent(input, 'change', this.onDimensionInputChange.bind(this));
     }
 
     private addControlButton(
@@ -465,12 +430,17 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         const cell = this.getCellFromPointer(pointerEvent);
         if (!cell) return;
 
+        if (pointerEvent.button !== 0 && pointerEvent.button !== 2) {
+            return;
+        }
+
         this.pointerIsDown = true;
         this.lastPaintedRow = cell.row;
         this.lastPaintedCol = cell.col;
+        const mode = this.getCurrentValue().mode;
         this.dragPixelValue = pointerEvent.button === 2
-            ? this.getOffPixelValue(this.getCurrentValue().mode)
-            : this.getBrushPixelValue();
+            ? this.getOffPixelValue(mode)
+            : this.getOnPixelValue(mode);
         this.paintLine(cell.row, cell.col, cell.row, cell.col, this.dragPixelValue);
     }
 
@@ -569,19 +539,16 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         }
     }
 
-    private onModeSelectChange() {
-        if (!this.modeSelect) return;
-        const newMode = FieldLedMatrixImage.normalizeMode(this.modeSelect.value);
-        const currentValue = this.getCurrentValue();
-        if (currentValue.mode === newMode) return;
-
-        const convertedValue = this.convertValueMode(currentValue, newMode);
-        this.applyValue(convertedValue);
-    }
-
     private onColourInputChange() {
         if (!this.colourInput) return;
         this.selectedColour = FieldLedMatrixImage.normalizeHexColour(this.colourInput.value);
+    }
+
+    private onDimensionInputChange() {
+        if (!this.widthInput || !this.heightInput) return;
+        if (this.widthInput.value === '' || this.heightInput.value === '') return;
+
+        this.applyDimensionInputs();
     }
 
     private applyDimensionInputs() {
@@ -646,29 +613,10 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         );
     }
 
-    private setBrushMode(mode: BrushMode) {
-        this.brushMode = mode;
-        this.updateBrushButtons();
-    }
-
-    private updateBrushButtons() {
-        this.paintButton?.classList.toggle(
-            'active-ledMatrixImage',
-            this.brushMode === 'paint',
-        );
-        this.eraseButton?.classList.toggle(
-            'active-ledMatrixImage',
-            this.brushMode === 'erase',
-        );
-    }
-
     private updateControlsFromValue() {
         const currentValue = this.getValue();
         if (!currentValue) return;
 
-        if (this.modeSelect) {
-            this.modeSelect.value = currentValue.mode;
-        }
         if (this.widthInput) {
             this.widthInput.value = String(currentValue.width);
         }
@@ -681,8 +629,6 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         if (this.colourControl) {
             this.colourControl.classList.toggle('hidden-ledMatrixImage', currentValue.mode !== 'rgb');
         }
-
-        this.updateBrushButtons();
     }
 
     private applyValue(value: LedMatrixImageValue) {
@@ -700,6 +646,13 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         this.updateBlockDisplayImage();
         this.renderCanvasEditor();
         this.updateControlsFromValue();
+    }
+
+    private rerenderSourceBlock() {
+        const sourceBlock = this.getSourceBlock();
+        if (sourceBlock instanceof Blockly.BlockSvg && sourceBlock.rendered) {
+            sourceBlock.render();
+        }
     }
 
     private dropdownDispose() {
@@ -722,13 +675,10 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         this.unbindEditorEvents();
         this.editorCanvas = null;
         this.editorContext = null;
-        this.modeSelect = null;
         this.widthInput = null;
         this.heightInput = null;
         this.colourInput = null;
         this.colourControl = null;
-        this.paintButton = null;
-        this.eraseButton = null;
         this.initialValue = null;
 
         Blockly.DropDownDiv.getContentDiv().classList.remove(
@@ -844,13 +794,6 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         return Math.max(2, Math.min(12, fitSize));
     }
 
-    private getBrushPixelValue(): LedMatrixImagePixel {
-        const mode = this.getCurrentValue().mode;
-        return this.brushMode === 'erase'
-            ? this.getOffPixelValue(mode)
-            : this.getOnPixelValue(mode);
-    }
-
     private getOnPixelValue(mode: LedMatrixImageMode): LedMatrixImagePixel {
         return mode === 'rgb' ? this.selectedColour : 1;
     }
@@ -866,34 +809,6 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
                 : this.pixelColours.empty;
         }
         return pixel === 1 ? this.pixelColours.mono : this.pixelColours.empty;
-    }
-
-    private convertValueMode(
-        value: LedMatrixImageValue,
-        mode: LedMatrixImageMode,
-    ): LedMatrixImageValue {
-        const nextValue = this.createEmptyValue(value.width, value.height, mode);
-
-        for (let row = 0; row < value.height; row++) {
-            for (let col = 0; col < value.width; col++) {
-                const pixel = value.pixels[row][col];
-                if (mode === 'rgb') {
-                    nextValue.pixels[row][col] = this.isPixelOn(pixel, value.mode)
-                        ? this.selectedColour
-                        : null;
-                } else {
-                    nextValue.pixels[row][col] = this.isPixelOn(pixel, value.mode) ? 1 : 0;
-                }
-            }
-        }
-
-        return nextValue;
-    }
-
-    private isPixelOn(pixel: LedMatrixImagePixel, mode: LedMatrixImageMode) {
-        return mode === 'rgb'
-            ? typeof pixel === 'string' && FieldLedMatrixImage.isHexColour(pixel)
-            : pixel === 1;
     }
 
     private createEmptyValue(
@@ -1007,7 +922,7 @@ export class FieldLedMatrixImage extends Blockly.Field<LedMatrixImageValue> {
         const inferredWidth = Array.isArray(sourcePixels[0])
             ? sourcePixels[0].length
             : config?.width || DEFAULT_WIDTH;
-        const mode = FieldLedMatrixImage.normalizeMode(value.mode ?? config?.mode);
+        const mode = FieldLedMatrixImage.normalizeMode(config?.mode ?? value.mode);
         const width = FieldLedMatrixImage.clampDimension(
             value.width ?? inferredWidth,
             config?.minWidth ?? DEFAULT_MIN_SIZE,
@@ -1133,10 +1048,11 @@ Blockly.Css.register(`
   padding: 10px;
 }
 .toolbar-ledMatrixImage {
-  align-items: center;
+    align-items: flex-start;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+    justify-content: space-between;
 }
 .controlGroup-ledMatrixImage,
 .dimensionControl-ledMatrixImage {
@@ -1150,13 +1066,28 @@ Blockly.Css.register(`
   display: inline-flex;
   gap: 6px;
 }
+.rightControls-ledMatrixImage {
+    align-items: center;
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-left: auto;
+}
 .label-ledMatrixImage {
   color: #e8e8e8;
   font-size: 12px;
   line-height: 1;
   white-space: nowrap;
 }
-.select-ledMatrixImage,
+.hint-ledMatrixImage {
+    color: #cfcfcf;
+    font-size: 12px;
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+    width: 100%;
+}
 .dimensionInput-ledMatrixImage {
   background: #ffffff;
   border: 1px solid #777;
@@ -1164,9 +1095,6 @@ Blockly.Css.register(`
   color: #222;
   font-size: 12px;
   height: 26px;
-}
-.select-ledMatrixImage {
-  min-width: 68px;
 }
 .dimensionInput-ledMatrixImage {
   padding: 0 4px;
@@ -1213,10 +1141,6 @@ Blockly.Css.register(`
 .controlButton-ledMatrixImage:hover {
   background: #444;
   border-color: #888;
-}
-.controlButton-ledMatrixImage.active-ledMatrixImage {
-  background: #0f6bdc;
-  border-color: #5ba2ff;
 }
 .hidden-ledMatrixImage {
   display: none;
