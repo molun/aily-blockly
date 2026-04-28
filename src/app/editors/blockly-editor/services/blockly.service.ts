@@ -1239,11 +1239,16 @@ export class BlocklyService {
       return;
     }
 
+    const query = this.toolboxSearchQuerySubject.value.trim();
+    if (!query) {
+      this.clearToolboxSelection();
+      return;
+    }
+
     const toolbox = this.workspace?.getToolbox();
     toolbox?.clearSelection();
 
-    const query = this.toolboxSearchQuerySubject.value.trim();
-    const blockTypes = query ? this.blockSearcher.blockTypesMatching(query) : [];
+    const blockTypes = this.blockSearcher.blockTypesMatching(query);
     const flyoutDef = blockTypes.length
       ? blockTypes.map((blockType) => ({
           kind: 'block',
@@ -1251,7 +1256,7 @@ export class BlocklyService {
         }))
       : [{
           kind: 'label',
-          text: query ? 'No matching blocks found' : 'Type to search for blocks',
+          text: 'No matching blocks found',
         }];
 
     flyout.show(flyoutDef as any);
