@@ -1,6 +1,7 @@
 import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, EventEmitter, Input, OnDestroy, OnInit, Output, ViewChild, effect } from '@angular/core';
 import * as Blockly from 'blockly';
 import { Subject, combineLatest } from 'rxjs';
+
 import { debounceTime, takeUntil, map, distinctUntilChanged, pairwise, startWith } from 'rxjs/operators';
 import { TranslateService } from '@ngx-translate/core';
 
@@ -55,6 +56,7 @@ import './custom-field/field-bitmap-u8g2';
 import './custom-field/field-image';
 import './custom-field/field-image-preview';
 import './custom-field/field-led-matrix';
+import './custom-field/field-led-matrix-image';
 import './custom-field/field-led-pattern-selector';
 import './custom-field/field-tone';
 import './custom-field/field-multilineinput';
@@ -93,6 +95,9 @@ import { applyWindowsBlocklyScrollbarThickness } from '../../utils/apply-windows
 import { BlocklyToolboxPaneComponent } from './components/blockly-toolbox-pane/blockly-toolbox-pane.component';
 import { BlocklyWorkspacePagesComponent } from './components/blockly-workspace-pages/blockly-workspace-pages.component';
 import { CodeViewerIpcService } from '../../services/code-viewer-ipc.service';
+
+// 全局关闭 Blockly 文本输入字段的拼写检查，避免 block 内 input 出现红色波浪线
+(Blockly.FieldTextInput.prototype as unknown as { spellcheck_: boolean }).spellcheck_ = false;
 
 /** Flyout 图钉右侧额外留白：Blockly 垂直条在 injectionDiv；vScroll 不可见时 DOM 仍可能有宽度，需一并判断 */
 function flyoutPinRightExtraX(
@@ -392,9 +397,10 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
     effect(() => {
       const mode = this.themeService.theme();
       if (this.workspace) {
-        this.workspace.setTheme(mode === 'light' ? LightTheme : DarkTheme);
+        this.workspace.setTheme(this.blocklyThemeForMode(mode));
         this.applyBlocklyGridColour(mode);
       }
+      this.applyMinimapTheme(mode);
     });
   }
 
@@ -694,7 +700,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
 
       // 根据当前主题设置 Blockly 主题与网格颜色（浅色 #ddd / 深色 #393939，见 theme.config）
       const currentTheme = this.themeService.theme();
-      this.options.theme = currentTheme === 'light' ? LightTheme : DarkTheme;
+      this.options.theme = this.blocklyThemeForMode(currentTheme);
       this.options.grid.colour = blocklyGridColourForUiTheme(currentTheme);
 
       applyWindowsBlocklyScrollbarThickness(this.platformService.isWindows());
@@ -781,6 +787,7 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
       if (this.configData.blockly.minimap) {
         this.minimap = new Minimap(this.workspace);
         this.minimap.init();
+        this.applyMinimapTheme(currentTheme);
         // 禁用 minimap 内置的 mirror（Events.fromJson 重放会触发 custom field 的 "associated block is undefined"）
         // 仅使用 syncMinimap 的全量 XML 同步，避免 Events.fromJson 与 custom field 的兼容性问题
         (this.minimap as any).mirror = () => { };
@@ -905,6 +912,15 @@ export class BlocklyComponent implements OnInit, AfterViewInit, OnDestroy {
     pattern.querySelectorAll('line').forEach((line) => {
       line.setAttribute('stroke', colour);
     });
+  }
+
+  private blocklyThemeForMode(mode: ThemeMode) {
+    return mode === 'light' ? LightTheme : DarkTheme;
+  }
+
+  private applyMinimapTheme(mode: ThemeMode): void {
+    const minimapWorkspace = (this.minimap as any)?.minimapWorkspace as Blockly.WorkspaceSvg | undefined;
+    minimapWorkspace?.setTheme(this.blocklyThemeForMode(mode));
   }
 
   /** 根据配置应用 flyout 自动关闭，支持初始化及配置重载时实时生效 */
