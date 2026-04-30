@@ -252,6 +252,14 @@
     .blockly-focus-region {
         fill: var(--aily-blockly-minimap-focus-region) !important;
     }
+
+    // 隐藏 minimap 内部的滚动条（水平/垂直）
+    .blocklyScrollbarHorizontal,
+    .blocklyScrollbarVertical,
+    .blocklyScrollbarBackground,
+    .blocklyScrollbarHandle {
+        display: none !important;
+    }
 }
 
 :host ::ng-deep .blockly-spin {
