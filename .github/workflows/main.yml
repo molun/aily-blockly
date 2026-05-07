@@ -641,94 +641,119 @@ jobs:
               "### 体验改进": "🔧 体验改进",
           }
 
+          def log_model_configs(request_label, model_configs):
+              models = [model or "(unnamed-model)" for _, _, model in model_configs]
+              print(f"ℹ️ {request_label}: available model configs ({len(model_configs)}): {models}")
+
+          def build_repair_prompt(version, raw_changelog, section_title, category_order, language):
+              ordered_categories = ", ".join(category_order)
+              return (
+                f"Rewrite the following {language} desktop application changelog so it strictly matches the required Markdown format.\n\n"
+                f"Required first line: ## {version}\n"
+                f"Required second line: {section_title}\n"
+                f"Allowed category headings in order: {ordered_categories}\n\n"
+                "Rules:\n"
+                "- Keep only user-facing release notes.\n"
+                "- Use bullet points only under category headings.\n"
+                "- Omit empty categories.\n"
+                "- Do not add explanations, summaries, or code fences.\n"
+                "- Output pure Markdown only.\n\n"
+                "Source changelog to repair:\n"
+                f"{raw_changelog}"
+              )
+
+          def normalize_changelog_output(raw_output, version, section_title, category_aliases, category_order):
+              text = strip_think_tags(raw_output or "")
+              text = text.replace('\r\n', '\n').replace('\r', '\n')
+              lines = [line.rstrip() for line in text.split('\n')]
+
+              categories = {heading: [] for heading in category_order}
+              current_category = None
+              bullet_count = 0
+              saw_section_title = False
+              unexpected_content = False
+
+              for raw_line in lines:
+                line = raw_line.strip()
+                if not line:
+                  continue
+
+                if line == f"## {version}":
+                  continue
+
+                if line == section_title or line.lstrip('#').strip() == section_title.lstrip('#').strip():
+                  saw_section_title = True
+                  continue
+
+                normalized_heading = category_aliases.get(line)
+                if normalized_heading is None:
+                  normalized_heading = category_aliases.get(line.lstrip('#').strip())
+
+                if normalized_heading:
+                  current_category = normalized_heading
+                  continue
+
+                if line.startswith('- ') or line.startswith('* '):
+                  bullet_text = re.sub(r'^[*-]\s+', '', line).strip()
+                  while bullet_text.startswith('- ') or bullet_text.startswith('* '):
+                    bullet_text = re.sub(r'^[*-]\s+', '', bullet_text).strip()
+                  if not bullet_text:
+                    unexpected_content = True
+                    continue
+                  if current_category is None:
+                    current_category = category_order[-1]
+                  categories[current_category].append(f"- {bullet_text}")
+                  bullet_count += 1
+                  continue
+
+                if current_category and categories[current_category]:
+                  categories[current_category][-1] += f" {line}"
+                  continue
+
+                unexpected_content = True
+
+              normalized_sections = []
+              for heading in category_order:
+                bullets = categories[heading]
+                if not bullets:
+                  continue
+                normalized_sections.append(heading)
+                normalized_sections.extend(bullets)
+                normalized_sections.append("")
+
+              if not normalized_sections:
+                return f"## {version}\n\n{section_title}\n", False, 0
+
+              normalized = f"## {version}\n\n{section_title}\n\n" + "\n".join(normalized_sections).rstrip() + "\n"
+              is_valid = saw_section_title and bullet_count > 0 and not unexpected_content
+              return normalized, is_valid, bullet_count
+
           def strip_think_tags(text):
               """Remove <think>...</think> blocks and standalone tags from AI output."""
               text = re.sub(r'<think>[\s\S]*?</think>', '', text)
               text = re.sub(r'</?think>', '', text)
               return text.strip()
 
-          def clean_ai_text(text):
-              """Strip common wrapper noise while keeping potential Markdown content."""
-              text = strip_think_tags(text or "")
-              text = re.sub(r'^\s*```[a-zA-Z0-9_-]*\s*$', '', text, flags=re.MULTILINE)
-              text = re.sub(r'</?(analysis|final|output|response)>', '', text, flags=re.IGNORECASE)
-              return text.replace('\r\n', '\n').replace('\r', '\n').strip()
+          def call_ai_with_fallbacks(*args):
+              """Try one or more model configs and return on the first successful response."""
+              if len(args) == 2:
+                model_configs, prompt = args
+                request_label = "AI request"
+              elif len(args) == 3:
+                model_configs, prompt, request_label = args
+              elif len(args) == 4:
+                base_url, api_key, model, prompt = args
+                model_configs = [(base_url, api_key, model)]
+                request_label = "AI request"
+              elif len(args) == 5:
+                base_url, api_key, model, prompt, request_label = args
+                model_configs = [(base_url, api_key, model)]
+              else:
+                raise TypeError(
+                  "call_ai_with_fallbacks expects (model_configs, prompt[, request_label]) "
+                  "or (base_url, api_key, model, prompt[, request_label])"
+                )
 
-          def normalize_changelog_output(text, version, section_title, category_aliases, category_order):
-              """Extract only the allowed Markdown structure from a noisy model response."""
-              lines = [line.rstrip() for line in clean_ai_text(text).split('\n')]
-              sections = {category: [] for category in category_order}
-              current_category = None
-              started = False
-
-              for raw_line in lines:
-                stripped = raw_line.strip()
-                if not stripped:
-                  continue
-
-                normalized = re.sub(r'\s+', ' ', stripped)
-
-                if stripped == f"## {version}" or normalized == f"## {version}":
-                  started = True
-                  current_category = None
-                  continue
-
-                if normalized == section_title:
-                  started = True
-                  current_category = None
-                  continue
-
-                canonical_category = category_aliases.get(normalized)
-                if canonical_category:
-                  started = True
-                  current_category = canonical_category
-                  continue
-
-                bullet_match = re.match(r'^[-*]\s+(.+)$', stripped)
-                if bullet_match and current_category:
-                  bullet = f"- {bullet_match.group(1).strip()}"
-                  if bullet not in sections[current_category]:
-                    sections[current_category].append(bullet)
-                  continue
-
-                if started and current_category and raw_line.startswith('  ') and sections[current_category]:
-                  sections[current_category][-1] = f"{sections[current_category][-1]} {stripped}"
-
-              bullet_count = sum(len(items) for items in sections.values())
-              output_lines = [f"## {version}", "", section_title, ""]
-              for category in category_order:
-                if sections[category]:
-                  output_lines.append(category)
-                  output_lines.extend(sections[category])
-                  output_lines.append("")
-
-              normalized_output = "\n".join(output_lines).strip() + "\n"
-              return normalized_output, bullet_count > 0, bullet_count
-
-          def build_repair_prompt(version, raw_text, section_title, category_order, language_name):
-              categories = ", ".join(category_order)
-              return (
-                f"Rewrite the following {language_name} release note output into strict Markdown.\n\n"
-                f"Required first line: ## {version}\n"
-                f"Required second line: {section_title}\n"
-                f"Allowed category headings only, in this order when present: {categories}.\n"
-                "Keep only user-facing release note bullets. Remove analysis, reasoning, commentary, notes, and duplicated content.\n"
-                "Use bullet points only under category headings. Output Markdown only.\n\n"
-                "Source text:\n"
-                f"{clean_ai_text(raw_text)}"
-              )
-
-          def log_model_configs(label, model_configs):
-              models = [model for _, _, model in model_configs if model]
-              if not models:
-                  print(f"⚠️ {label}: no AI model name configured")
-                  return
-              print(f"ℹ️ {label} primary AI model: {models[0]}")
-              if len(models) > 1:
-                  print(f"ℹ️ {label} fallback AI models: {', '.join(models[1:])}")
-
-          def call_ai_with_fallbacks(model_configs, prompt, request_label="AI request"):
-              """Try one or more model configs and return the first successful response with model metadata."""
               last_exc = None
               for idx, (base_url, api_key, model) in enumerate(model_configs, 1):
                 if not base_url or not api_key:
@@ -1033,9 +1058,7 @@ jobs:
             ./release/*.exe
             ./release-cn/*.exe
             ./release/*.dmg
-            ./release/*.zip
             ./release-mac-cn/*.dmg
-            ./release-mac-cn/*.zip
             ./release/CHANGELOG.md
             ./release/CHANGELOG_ZH.md
           draft: false

@@ -23,7 +23,7 @@ const builderArgs = [
   `-c.publish.url=${updateBaseUrl}`,
   `-c.win.artifactName=${artifactPrefix}-\${version}.\${ext}`,
   `-c.nsis.artifactName=${artifactPrefix}-Setup-\${version}.\${ext}`,
-  `-c.mac.artifactName=${artifactPrefix}-\${version}-\${arch}.\${ext}`
+  `-c.mac.artifactName=${artifactPrefix}-macos-\${version}-\${arch}.\${ext}`
 ];
 const ngCliPath = path.join(workspaceRoot, 'node_modules', '@angular', 'cli', 'bin', 'ng.js');
 const electronBuilderCliPath = path.join(workspaceRoot, 'node_modules', 'electron-builder', 'cli.js');
