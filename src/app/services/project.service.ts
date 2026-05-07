@@ -128,7 +128,9 @@ export class ProjectService {
   }
 
   private buildProjectPath(newProjectData: NewProjectData): string {
-    return window['path'].join(newProjectData.path, newProjectData.name.replace(/\s/g, '_'));
+    const inputName = String(newProjectData.name ?? '').trim();
+    const projectPath = window['path'].join(newProjectData.path, inputName.replace(/\s/g, '_'));
+    return projectPath;
   }
 
   private updateNewProjectPackageJson(
@@ -136,26 +138,22 @@ export class ProjectService {
     newProjectData: NewProjectData,
     options?: { removeCloudId?: boolean }
   ) {
+    const inputName = String(newProjectData.name ?? '').trim();
     const packageJson = JSON.parse(window['fs'].readFileSync(`${projectPath}/package.json`));
-    if (this.containsChineseCharacters(newProjectData.name)) {
-      packageJson.name = pinyin(newProjectData.name, {
-        toneType: "none",
-        separator: ""
-      }).replace(/\s/g, '_');
-    } else {
-      packageJson.name = newProjectData.name;
-    }
-
-    if (newProjectData.devmode) {
+      if (this.containsChineseCharacters(inputName)) {
+        packageJson.name = pinyin(inputName, {
+          toneType: "none",
+          separator: ""
+        }).replace(/\s/g, '_');
+        packageJson.nickname = inputName;
+      } else {
+        packageJson.name = inputName;
+        packageJson.nickname = packageJson.name;
+      }
+      // 设置开发框架
       packageJson.devmode = newProjectData.devmode;
-    }
 
-    if (options?.removeCloudId) {
-      delete packageJson.cloudId;
-      delete packageJson.nickname;
-    }
-
-    window['fs'].writeFileSync(`${projectPath}/package.json`, JSON.stringify(packageJson, null, 2));
+      window['fs'].writeFileSync(`${projectPath}/package.json`, JSON.stringify(packageJson, null, 2));
   }
 
   private async finishProjectCreation(projectPath: string): Promise<boolean> {
@@ -308,15 +306,17 @@ export class ProjectService {
     if (packageJson.cloudId) {
       delete packageJson.cloudId;
     }
-    // 获取新的项目名称
-    let name = path.split('\\').pop();
+    // 获取新的项目名称（文件夹名）
+    let name = window['path'].basename(path);
     if (this.containsChineseCharacters(name)) {
       packageJson.name = pinyin(name, {
         toneType: "none",
         separator: ""
       }).replace(/\s/g, '_');
+      packageJson.nickname = name;
     } else {
       packageJson.name = name;
+      packageJson.nickname = name;
     }
     window['fs'].writeFileSync(`${path}/package.json`, JSON.stringify(packageJson, null, 2));
     // 修改当前项目路径
