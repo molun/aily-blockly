@@ -66,8 +66,7 @@ export class NpmService {
       title: this.translate.instant('NPM.DEPENDENCY_INSTALLING_TITLE'),
       text: this.translate.instant('NPM.INSTALLING_DEPENDENCY', { name: progress.name }),
       state: 'doing',
-      progress: nextProgress,
-      setTimeout: 300000
+      progress: nextProgress
     });
   }
 
@@ -212,13 +211,7 @@ export class NpmService {
       setTimeout: 300000
     });
     try {
-      // 添加超时保护和正确的参数名
-      await this.appDataResourceLock.runExclusive(`npm:install-board:${board.name}`, () => Promise.race([
-        window['npm'].run({ cmd: cmd }),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(this.translate.instant('NPM.INSTALL_TIMEOUT'))), 300000) // 5分钟超时
-        )
-      ]));
+      await this.appDataResourceLock.runExclusive(`npm:install-board:${board.name}`, () => window['npm'].run({ cmd: cmd }));
     } catch (error) {
       const errorMessage = this.getNpmErrorMessage(error);
       console.error(`安装开发板 ${board.name} 失败:`, error);
@@ -382,12 +375,7 @@ export class NpmService {
             const uninstallCmd = `npm uninstall ${dependency.name} --prefix "${appDataPath}"`;
             console.log(`执行命令: ${uninstallCmd}, 时间: ${new Date().toISOString()}`);
             this.traceToAppLog('DEP_UNINSTALL_START', { name: dependency.name, version: dependency.version });
-            await Promise.race([
-              window['npm'].run({ cmd: uninstallCmd }),
-              new Promise((_, reject) =>
-                setTimeout(() => reject(new Error(this.translate.instant('NPM.UNINSTALL_TIMEOUT'))), 300000)
-              )
-            ]);
+            await window['npm'].run({ cmd: uninstallCmd });
           }
 
           // --save-exact：与开发板声明版本一致写入 prefix 下 package.json，避免 ^ 导致再次解析到更高版
@@ -395,13 +383,7 @@ export class NpmService {
           console.log(`执行命令: ${npmCmd}, 时间: ${new Date().toISOString()}`);
           this.traceToAppLog('DEP_INSTALL_START', { name: dependency.name, version: dependency.version });
 
-          // 添加超时保护和正确的参数名
-          await Promise.race([
-            window['npm'].run({ cmd: npmCmd }),
-            new Promise((_, reject) =>
-              setTimeout(() => reject(new Error(this.translate.instant('NPM.INSTALL_TIMEOUT'))), 300000) // 5分钟超时
-            )
-          ]);
+          await window['npm'].run({ cmd: npmCmd });
 
           this.updateBoardDependencyNotice(progress, ((index + 1) / dependenciesToInstall.length) * 100);
           console.log(`依赖 ${dependency.name} 安装成功, 时间: ${new Date().toISOString()}`);
@@ -508,12 +490,7 @@ export class NpmService {
               const npmCmd = `npm uninstall ${depName} --prefix "${appDataPath}"`;
               console.log(`执行命令: ${npmCmd}, 时间: ${new Date().toISOString()}`);
 
-              await Promise.race([
-                window['npm'].run({ cmd: npmCmd }),
-                new Promise((_, reject) =>
-                  setTimeout(() => reject(new Error(this.translate.instant('NPM.UNINSTALL_TIMEOUT'))), 300000)
-                )
-              ]);
+              await window['npm'].run({ cmd: npmCmd });
 
               console.log(`依赖 ${depName} 卸载成功, 时间: ${new Date().toISOString()}`);
             } catch (error) {
