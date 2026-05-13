@@ -424,7 +424,7 @@ export class NpmService {
       this.traceToAppLog('DEPS_ERROR', { error: errorMessage });
       // this.uiService.updateFooterState({ state: 'error', text: this.translate.instant('NPM.BOARD_DEPS_INSTALL_FAILED') });
       this.noticeService.update({ 
-        title: this.translate.instant('NPM.INSTALL_FAILED_TITLE'), 
+        title: this.translate.instant('NPM.DEPENDENCY_INSTALL_FAILED_TITLE'), 
         text: this.translate.instant('NPM.BOARD_DEPS_INSTALL_FAILED'), 
         detail: errorMessage,
         state: 'error'
